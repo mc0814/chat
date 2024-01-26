@@ -6,8 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-
 	"github.com/tinode/chat/server/push"
 )
 
@@ -59,9 +57,9 @@ func (stdoutPush) Init(jsonconf json.RawMessage) (bool, error) {
 		for {
 			select {
 			case msg := <-handler.input:
-				fmt.Fprintln(os.Stdout, msg)
+				fmt.Printf("这个是正常信息%+v\n", msg)
 			case msg := <-handler.channel:
-				fmt.Fprintln(os.Stdout, msg)
+				fmt.Printf("这个是订阅频道信息%+v\n", msg)
 			case <-handler.stop:
 				return
 			}
