@@ -5,7 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"github.com/sideshow/apns2"
+	"github.com/sideshow/apns2/certificate"
+	"github.com/tinode/chat/server/logs"
 	"github.com/tinode/chat/server/push"
+	"github.com/tinode/chat/server/push/common"
+	"github.com/tinode/chat/server/store"
+	"log"
 )
 
 var handler Handler
@@ -26,10 +31,12 @@ type Handler struct {
 }
 
 type configType struct {
-	Enabled         bool   `json:"enabled"`
-	CredentialsFile string `json:"credentials_file"`
-	AppTopic        string `json:"app_topic"`
-	TimeToLive      int    `json:"time_to_live,omitempty"`
+	Enabled             bool           `json:"enabled"`
+	CredentialsFile     string         `json:"credentials_file"`
+	CredentialsPassword string         `json:"credentials_password"`
+	AppTopic            string         `json:"app_topic"`
+	TimeToLive          int            `json:"time_to_live,omitempty"`
+	CommonConfig        *common.Config `json:"common_config"`
 }
 
 func (h Handler) Init(jsonconf json.RawMessage) (bool, error) {
@@ -43,89 +50,82 @@ func (h Handler) Init(jsonconf json.RawMessage) (bool, error) {
 		return false, nil
 	}
 
-	fmt.Println(jsonconf)
+	fmt.Printf("hhhhh%+v\n", config)
 
-	//cert, err := certificate.FromP12File(config.CredentialsFile, "")
-	//if err != nil {
-	//	log.Fatal("Cert Error:", err)
-	//}
-	//
+	cert, err := certificate.FromP12File(config.CredentialsFile, config.CredentialsPassword)
+	if err != nil {
+		log.Fatal("Cert Error:", err)
+	}
+
+	handler.client = apns2.NewClient(cert).Development() // TODO 上线要切换成线上环境
 	//handler.client = apns2.NewClient(cert).Production()
-	//
-	//handler.input = make(chan *push.Receipt, bufferSize)
-	//handler.channel = make(chan *push.ChannelReq, bufferSize)
-	//handler.stop = make(chan bool, 1)
-	//
-	//go func() {
-	//	for {
-	//		select {
-	//		//case rcpt := <-handler.input:
-	//		//go sendApns(rcpt, &config)
-	//		case sub := <-handler.channel:
-	//			fmt.Printf("fcm channel msg %+v\n", sub)
-	//		case <-handler.stop:
-	//			return
-	//		}
-	//	}
-	//}()
-	//
-	//notification := &apns2.Notification{}
-	//notification.DeviceToken = "11aa01229f15f0f0c52029d8cf8cd0aeaf2365fe4cebc4af26cd6d76b7919ef7"
-	//notification.Topic = "com.sideshow.Apns2"
-	//notification.Payload = []byte(`{"aps":{"alert":"Hello!"}}`) // See Payload section below
-	//
-	//fmt.Printf("%+v", notification)
-	////If you want to test push notifications for builds running directly from XCode (Development), use
-	////client := apns2.NewClient(cert).Development()
-	////For apps published to the app store or installed as an ad-hoc distribution use Production()
-	//res, err := handler.client.Push(notification)
-	//
-	//if err != nil {
-	//	log.Fatal("Error:", err)
-	//}
-	//
-	//fmt.Printf("%v %v %v\n", res.StatusCode, res.ApnsID, res.Reason)
+
+	handler.input = make(chan *push.Receipt, bufferSize)
+	handler.channel = make(chan *push.ChannelReq, bufferSize)
+	handler.stop = make(chan bool, 1)
+
+	go func() {
+		for {
+			select {
+			case rcpt := <-handler.input:
+				go sendApns(rcpt, &config)
+			case sub := <-handler.channel:
+				fmt.Printf("fcm channel msg %+v\n", sub)
+			case <-handler.stop:
+				return
+			}
+		}
+	}()
 
 	return true, nil
 }
 
-//func sendApns(rcpt *push.Receipt, config *configType) {
-//	messages, uids := fcm.PrepareV1Notifications(rcpt, config)
-//	for i := range messages {
-//		req := &fcmv1.SendMessageRequest{
-//			Message:      messages[i],
-//			ValidateOnly: config.DryRun,
-//		}
-//		_, err := handler.v1.Projects.Messages.Send("projects/"+handler.projectID, req).Do()
-//		if err != nil {
-//			gerr, decodingErrs := common.DecodeGoogleApiError(err)
-//			for _, err := range decodingErrs {
-//				logs.Info.Println("fcm googleapi.Error decoding:", err)
-//			}
-//			switch gerr.FcmErrCode {
-//			case "": // no error
-//			case common.ErrorQuotaExceeded, common.ErrorUnavailable, common.ErrorInternal, common.ErrorUnspecified:
-//				// Transient errors. Stop sending this batch.
-//				logs.Warn.Println("fcm transient failure:", gerr.FcmErrCode, gerr.ErrMessage)
-//				return
-//			case common.ErrorSenderIDMismatch, common.ErrorInvalidArgument, common.ErrorThirdPartyAuth:
-//				// Config errors. Stop.
-//				logs.Warn.Println("fcm invalid config:", gerr.FcmErrCode, gerr.ErrMessage)
-//				return
-//			case common.ErrorUnregistered:
-//				// Token is no longer valid. Delete token from DB and continue sending.
-//				logs.Warn.Println("fcm invalid token:", gerr.FcmErrCode, gerr.ErrMessage)
-//				if err := store.Devices.Delete(uids[i], messages[i].Token); err != nil {
-//					logs.Warn.Println("tnpg failed to delete invalid token:", err)
-//				}
-//			default:
-//				// Unknown error. Stop sending just in case.
-//				logs.Warn.Println("tnpg unrecognized error:", gerr.FcmErrCode, gerr.ErrMessage)
-//				return
-//			}
-//		}
-//	}
-//}
+func sendApns(rcpt *push.Receipt, config *configType) {
+	messages, uids := PrepareApnsNotifications(rcpt, config)
+	for i := range messages {
+		notification := messages[i]
+
+		test, _ := json.Marshal(notification)
+		fmt.Printf("json encode notification: %s\n", test)
+		fmt.Printf("%+v\n", notification)
+
+		//If you want to test push notifications for builds running directly from XCode (Development), use
+		//client := apns2.NewClient(cert).Development()
+		//For apps published to the app store or installed as an ad-hoc distribution use Production()
+		res, err := handler.client.Push(notification)
+
+		if err != nil {
+			logs.Warn.Println("apns push err:", err)
+		}
+
+		fmt.Printf("%v %v %v\n", res.StatusCode, res.ApnsID, res.Reason)
+
+		if res.StatusCode != 200 {
+			switch res.Reason {
+			case apns2.ReasonInternalServerError, apns2.ReasonServiceUnavailable:
+				// Transient errors. Stop sending this batch.
+				logs.Warn.Println("apns transient failure:", res.StatusCode, res.Reason)
+				return
+			case apns2.ReasonBadCollapseID, apns2.ReasonBadDeviceToken, apns2.ReasonBadExpirationDate, apns2.ReasonBadMessageID, apns2.ReasonBadPriority:
+			case apns2.ReasonBadTopic, apns2.ReasonDeviceTokenNotForTopic, apns2.ReasonDuplicateHeaders, apns2.ReasonIdleTimeout, apns2.ReasonInvalidPushType:
+			case apns2.ReasonMissingDeviceToken, apns2.ReasonMissingTopic, apns2.ReasonPayloadEmpty, apns2.ReasonTopicDisallowed, apns2.ReasonBadCertificate:
+				// Config errors. Stop.
+				logs.Warn.Println("apns invalid config:", res.StatusCode, res.Reason)
+				return
+			case apns2.ReasonUnregistered:
+				// Token is no longer valid. Delete token from DB and continue sending.
+				logs.Warn.Println("apns invalid token:", res.StatusCode, res.Reason)
+				if err := store.Devices.Delete(uids[i], messages[i].DeviceToken); err != nil {
+					logs.Warn.Println("apns failed to delete invalid token:", err)
+				}
+			default:
+				// Unknown error. Stop sending just in case.
+				logs.Warn.Println("apns unrecognized error:", res.StatusCode, res.Reason)
+				return
+			}
+		}
+	}
+}
 
 func (h Handler) IsReady() bool {
 	return handler.input != nil

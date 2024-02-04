@@ -587,9 +587,11 @@ func (src *MsgServerCtrl) describe() string {
 
 // MsgServerData is a server {data} message.
 type MsgServerData struct {
-	Topic string `json:"topic"`
+	Topic    string      `json:"topic"`
+	TopicPub interface{} `json:"topic_pub,omitempty"`
 	// ID of the user who originated the message as {pub}, could be empty if sent by the system
 	From      string         `json:"from,omitempty"`
+	FromPub   interface{}    `json:"from_pub,omitempty"`
 	Timestamp time.Time      `json:"ts"`
 	DeletedAt *time.Time     `json:"deleted,omitempty"`
 	SeqId     int            `json:"seq"`

@@ -66,6 +66,8 @@ type Payload struct {
 	Silent bool `json:"silent"`
 	// Topic which was affected by the action.
 	Topic string `json:"topic"`
+	// TopicPub is topic's public, for get topic name
+	TopicPub interface{} `json:"topic_pub,omitempty"`
 	// Timestamp of the action.
 	Timestamp time.Time `json:"ts"`
 
@@ -73,6 +75,8 @@ type Payload struct {
 
 	// Message sender 'usrXXX'
 	From string `json:"from"`
+	// sender's public, for get sender's username
+	FromPub interface{} `json:"from_pub,omitempty"`
 	// Sequential ID of the message.
 	SeqId int `json:"seq"`
 	// MIME-Type of the message content, text/x-drafty or text/plain

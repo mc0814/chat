@@ -331,6 +331,8 @@ func plainTextFormatter(n *node, ctx interface{}) error {
 			name = "?"
 		}
 		state.txt += "[FILE '" + name + "']"
+	case "AU":
+		state.txt += "[AUDIO]"
 	default:
 		state.txt += text
 	}

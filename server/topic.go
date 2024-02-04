@@ -1037,6 +1037,15 @@ func (t *Topic) saveAndBroadcastMessage(msg *ClientComMessage, asUid types.Uid, 
 		data.SkipSid = msg.sess.sid
 	}
 
+	if t.cat == types.TopicCatP2P {
+		originalPub, originalFound := t.perUser[types.ParseUserId(msg.Original)]
+		if originalFound {
+			data.Data.FromPub = originalPub.public
+		}
+	} else if t.cat == types.TopicCatGrp {
+		data.Data.TopicPub = t.public
+	}
+
 	// Message sent: notify offline 'R' subscrbers on 'me'.
 	t.presSubsOffline("msg", &presParams{seqID: t.lastID, actor: msg.AsUser},
 		&presFilters{filterIn: types.ModeRead}, nilPresFilters, "", true)

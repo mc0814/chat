@@ -1,9 +1,13 @@
 package apns
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/sideshow/apns2"
+	"github.com/tinode/chat/server/push/common"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/tinode/chat/server/drafty"
@@ -43,6 +47,20 @@ func payloadToData(pl *push.Payload) (map[string]string, error) {
 
 		// Convert Drafty content to plain text (clients 0.16 and below).
 		data["content"], err = drafty.PlainText(pl.Content)
+
+		switch t.GetTopicCat(pl.Topic) {
+		case t.TopicCatP2P:
+			data["title"] = getUserName(pl)
+		case t.TopicCatGrp:
+			fallthrough
+		case t.TopicCatFnd:
+			fallthrough
+		case t.TopicCatSys:
+			data["title"] = getTopicName(pl)
+			data["content"] = fmt.Sprintf("%s: %s", getUserName(pl), data["content"])
+		default:
+		}
+
 		if err != nil {
 			return nil, err
 		}
@@ -122,7 +140,7 @@ func PrepareApnsNotifications(rcpt *push.Receipt, config *configType) ([]*apns2.
 		}
 		devices, count, err = store.Devices.GetAll(uids...)
 		if err != nil {
-			logs.Warn.Println("fcm push: db error", err)
+			logs.Warn.Println("apns push: db error", err)
 			return nil, nil
 		}
 	}
@@ -165,12 +183,15 @@ func PrepareApnsNotifications(rcpt *push.Receipt, config *configType) ([]*apns2.
 
 				switch d.Platform {
 				case "ios":
-					msg = apnsNotificationConfig(rcpt.Payload.What, topic, userData, rcpt.To[uid].Unread, config, msg)
+					msg, err = apnsNotificationConfig(rcpt.Payload.What, topic, userData, rcpt.To[uid].Unread, config, msg)
+					if err != nil {
+						logs.Warn.Println("apns: generate notification config err", err)
+					}
 				case "web":
 				case "":
 					// ignore
 				default:
-					logs.Warn.Println("fcm: unknown device platform", d.Platform)
+					logs.Warn.Println("apns: unknown device platform", d.Platform)
 				}
 
 				uids = append(uids, uid)
@@ -215,79 +236,202 @@ func apnsShouldPresentAlert(what, callStatus, isSilent string, config *configTyp
 	return config.Enabled && what != push.ActRead && callStatus == "" && isSilent == ""
 }
 
-func apnsNotificationConfig(what, topic string, data map[string]string, unread int, config *configType, msg apns2.Notification) apns2.Notification {
-	//callStatus := data["webrtc"]
-	//expires := time.Now().UTC().Add(time.Duration(defaultTimeToLive) * time.Second)
-	//if config.TimeToLive > 0 {
-	//	expires = time.Now().UTC().Add(time.Duration(config.TimeToLive) * time.Second)
-	//}
-	//bundleId := config.AppTopic
-	//pushType := apns2.PushTypeAlert
-	//priority := 10
-	//interruptionLevel := payload2.InterruptionLevelTimeSensitive
-	//if callStatus == "started" {
-	//	// Send VOIP push only when a new call is started, otherwise send normal alert.
-	//	interruptionLevel = payload2.InterruptionLevelCritical
-	//	// FIXME: PushKit notifications do not work with the current FCM adapter.
-	//	// Using normal pushes as a poor-man's replacement for VOIP pushes.
-	//	// Uncomment the following two lines when FCM fixes its problem or when we switch to
-	//	// a different adapter.
-	//	// pushType = common.ApnsPushTypeVoip
-	//	// bundleId += ".voip"
-	//	expires = time.Now().UTC().Add(time.Duration(voipTimeToLive) * time.Second)
-	//} else if what == push.ActRead {
-	//	priority = 5
-	//	interruptionLevel = payload2.InterruptionLevelPassive
-	//	pushType = apns2.PushTypeBackground
-	//}
-	//
-	//apsPayload := common.Aps{
-	//	Badge:             unread,
-	//	ContentAvailable:  1,
-	//	MutableContent:    1,
-	//	InterruptionLevel: interruptionLevel,
-	//	Sound:             "default",
-	//	ThreadID:          topic,
-	//}
-	//
-	//// Do not present alert for read notifications and video calls.
-	//if apnsShouldPresentAlert(what, callStatus, data["silent"], config) {
-	//	body := config.Apns.GetStringField(what, "Body")
-	//	if body == "$content" {
-	//		body = data["content"]
-	//	}
-	//
-	//	apsPayload.Alert = &common.ApsAlert{
-	//		Action:          config.Apns.GetStringField(what, "Action"),
-	//		ActionLocKey:    config.Apns.GetStringField(what, "ActionLocKey"),
-	//		Body:            body,
-	//		LaunchImage:     config.Apns.GetStringField(what, "LaunchImage"),
-	//		LocKey:          config.Apns.GetStringField(what, "LocKey"),
-	//		Title:           config.Apns.GetStringField(what, "Title"),
-	//		Subtitle:        config.Apns.GetStringField(what, "Subtitle"),
-	//		TitleLocKey:     config.Apns.GetStringField(what, "TitleLocKey"),
-	//		SummaryArg:      config.Apns.GetStringField(what, "SummaryArg"),
-	//		SummaryArgCount: config.Apns.GetIntField(what, "SummaryArgCount"),
-	//	}
-	//}
-	//
-	//payload, err := json.Marshal(map[string]interface{}{"aps": apsPayload})
-	//if err != nil {
-	//	return nil
-	//}
-	//headers := map[string]string{
-	//	common.HeaderApnsExpiration: strconv.FormatInt(expires.Unix(), 10),
-	//	common.HeaderApnsPriority:   strconv.Itoa(priority),
-	//	common.HeaderApnsTopic:      bundleId,
-	//	common.HeaderApnsCollapseID: topic,
-	//	common.HeaderApnsPushType:   string(pushType),
-	//}
-	//
-	//ac := &fcmv1.ApnsConfig{
-	//	Headers: headers,
-	//	Payload: payload,
-	//}
-	//
-	//return ac
-	return msg
+func apnsNotificationConfig(what, topic string, data map[string]string, unread int, config *configType, msg apns2.Notification) (apns2.Notification, error) {
+	callStatus := data["webrtc"]
+	expires := time.Now().UTC().Add(time.Duration(defaultTimeToLive) * time.Second)
+	if config.TimeToLive > 0 {
+		expires = time.Now().UTC().Add(time.Duration(config.TimeToLive) * time.Second)
+	}
+	pushType := apns2.PushTypeAlert
+	priority := 10
+	interruptionLevel := common.InterruptionLevelTimeSensitive
+	if callStatus == "started" {
+		// Send VOIP push only when a new call is started, otherwise send normal alert.
+		interruptionLevel = common.InterruptionLevelCritical
+		// FIXME: PushKit notifications do not work with the current FCM adapter.
+		// Using normal pushes as a poor-man's replacement for VOIP pushes.
+		// Uncomment the following two lines when FCM fixes its problem or when we switch to
+		// a different adapter.
+		// pushType = common.ApnsPushTypeVoip
+		// bundleId += ".voip"
+		expires = time.Now().UTC().Add(time.Duration(voipTimeToLive) * time.Second)
+	} else if what == push.ActRead {
+		priority = 5
+		interruptionLevel = common.InterruptionLevelPassive
+		pushType = apns2.PushTypeBackground
+	}
+
+	apsPayload := common.Aps{
+		Badge:             unread,
+		ContentAvailable:  1,
+		MutableContent:    1,
+		InterruptionLevel: interruptionLevel,
+		Sound:             "default",
+		ThreadID:          topic,
+	}
+
+	// Do not present alert for read notifications and video calls.
+	if apnsShouldPresentAlert(what, callStatus, data["silent"], config) {
+		body := config.CommonConfig.GetStringField(what, "Body")
+		if body == "$content" {
+			body = data["content"]
+		}
+		title := config.CommonConfig.GetStringField(what, "Title")
+		if title == "$title" {
+			title = data["title"]
+		}
+
+		apsPayload.Alert = &common.ApsAlert{
+			Action:          config.CommonConfig.GetStringField(what, "Action"),
+			ActionLocKey:    config.CommonConfig.GetStringField(what, "ActionLocKey"),
+			Body:            body,
+			LaunchImage:     config.CommonConfig.GetStringField(what, "LaunchImage"),
+			LocKey:          config.CommonConfig.GetStringField(what, "LocKey"),
+			Title:           title,
+			Subtitle:        config.CommonConfig.GetStringField(what, "Subtitle"),
+			TitleLocKey:     config.CommonConfig.GetStringField(what, "TitleLocKey"),
+			SummaryArg:      config.CommonConfig.GetStringField(what, "SummaryArg"),
+			SummaryArgCount: config.CommonConfig.GetIntField(what, "SummaryArgCount"),
+		}
+	}
+
+	fmt.Printf("apspayload: %+v\n", apsPayload.Alert)
+
+	payload, err := json.Marshal(map[string]interface{}{"aps": apsPayload})
+	if err != nil {
+		return msg, err
+	}
+
+	msg.CollapseID = topic
+	msg.Expiration = expires
+	msg.PushType = pushType
+	msg.Priority = priority
+	msg.Payload = payload
+
+	return msg, nil
+}
+
+// get username from payload.From
+func getUserName(pl *push.Payload) string {
+	var userPublic interface{}
+	username := ""
+	if pl.FromPub != nil {
+		userPublic = pl.FromPub
+	} else {
+		uid := t.ParseUserId(pl.From)
+
+		if uid.IsZero() {
+			logs.Warn.Println("apns parse uid.IsZero")
+			return ""
+		}
+
+		suser, err := store.Users.Get(uid)
+		if err != nil {
+			logs.Warn.Println("apns get user error: ", err)
+			return ""
+		}
+		if suser == nil {
+			logs.Warn.Println("apns user not found")
+			return ""
+		}
+		userPublic = suser.Public
+	}
+
+	if userInfo, ok := userPublic.(map[string]interface{}); ok {
+		if username, ok = userInfo["fn"].(string); !ok {
+			logs.Warn.Println("apns parse user info fail")
+			return ""
+		}
+	}
+
+	return username
+}
+
+// get topic from Payload.Topic
+func getTopicName(pl *push.Payload) string {
+	var topicPublic interface{}
+	topicName := ""
+	if pl.TopicPub != nil {
+		topicPublic = pl.TopicPub
+	} else {
+		stopic, err := store.Topics.Get(pl.Topic)
+		if err != nil {
+			logs.Warn.Println("apns get topic info error: ", err)
+			return ""
+		}
+		if stopic == nil {
+			logs.Warn.Println("apns topic not found")
+			return ""
+		}
+		topicPublic = stopic.Public
+	}
+
+	if topicInfo, ok := topicPublic.(map[string]interface{}); ok {
+		if topicName, ok = topicInfo["fn"].(string); !ok {
+			logs.Warn.Println("apns parse topic info fail")
+			return ""
+		}
+	}
+
+	return topicName
+}
+
+func getTitle(pl *push.Payload) string {
+	notifyTitle := ""
+
+	if strings.HasPrefix(pl.Topic, "grp") || pl.Topic == "sys" {
+		stopic, err := store.Topics.Get(pl.Topic)
+		if err != nil {
+			logs.Warn.Println("apns get topic info error: ", err)
+			return ""
+		}
+		if stopic == nil {
+			logs.Warn.Println("apns topic not found")
+			return ""
+		}
+
+		if topicInfo, ok := stopic.Public.(map[string]interface{}); ok {
+			if notifyTitle, ok = topicInfo["fn"].(string); !ok {
+				logs.Warn.Println("apns parse topic info error: ", err)
+				return ""
+			}
+		}
+	} else {
+		// 'me' and p2p topics
+		uid := t.ZeroUid
+		if strings.HasPrefix(pl.Topic, "usr") {
+			// User specified as usrXXX
+			uid = t.ParseUserId(pl.Topic)
+		} else if strings.HasPrefix(pl.Topic, "p2p") {
+			uid = t.ParseUserId(pl.From)
+		}
+
+		if uid.IsZero() {
+			logs.Warn.Println("apns parse uid.IsZero")
+			return ""
+		}
+
+		suser, err := store.Users.Get(uid)
+		if err != nil {
+			logs.Warn.Println("apns get user error: ", err)
+			return ""
+		}
+		if suser == nil {
+			logs.Warn.Println("apns user not found")
+			return ""
+		}
+
+		if userInfo, ok := suser.Public.(map[string]interface{}); ok {
+			if notifyTitle, ok = userInfo["fn"].(string); !ok {
+				logs.Warn.Println("apns parse user info error: ")
+				return ""
+			}
+		}
+	}
+
+	if notifyTitle == "" {
+		return "New message"
+	}
+
+	return notifyTitle
 }
