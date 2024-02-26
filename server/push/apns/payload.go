@@ -80,6 +80,9 @@ func payloadToData(pl *push.Payload) (map[string]string, error) {
 			data["webrtc"] = pl.Webrtc
 			if pl.AudioOnly {
 				data["aonly"] = "true"
+				data["content"] = "[AUDIO CALL]"
+			} else {
+				data["content"] = "[VIDEO CALL]"
 			}
 			// Video call push notifications are silent.
 			data["silent"] = "true"
@@ -233,7 +236,7 @@ func ChannelsForUser(uid t.Uid) []string {
 }
 
 func apnsShouldPresentAlert(what, callStatus, isSilent string, config *configType) bool {
-	return config.Enabled && what != push.ActRead && callStatus == "" && isSilent == ""
+	return config.Enabled && what != push.ActRead && ((callStatus == "" && isSilent == "") || callStatus == "started")
 }
 
 func apnsNotificationConfig(what, topic string, data map[string]string, unread int, config *configType, msg apns2.Notification) (apns2.Notification, error) {
@@ -252,8 +255,9 @@ func apnsNotificationConfig(what, topic string, data map[string]string, unread i
 		// Using normal pushes as a poor-man's replacement for VOIP pushes.
 		// Uncomment the following two lines when FCM fixes its problem or when we switch to
 		// a different adapter.
-		// pushType = common.ApnsPushTypeVoip
-		// bundleId += ".voip"
+		// TODO:: why push voip type, return DeviceTokenNotForTopic error
+		//pushType = apns2.PushTypeVOIP
+		//msg.Topic += ".voip"
 		expires = time.Now().UTC().Add(time.Duration(voipTimeToLive) * time.Second)
 	} else if what == push.ActRead {
 		priority = 5

@@ -2782,6 +2782,34 @@ func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) (err erro
 	return tx.Commit()
 }
 
+// MessageGetByTopicSeqId get a single message by topic and seqId
+func (a *adapter) MessageGetByTopicSeqId(topic string, seqId int) (*t.Message, error) {
+	ctx, cancel := a.getContext()
+	if cancel != nil {
+		defer cancel()
+	}
+
+	var msg = new(t.Message)
+	err := a.db.GetContext(ctx, msg,
+		"SELECT *"+
+			" FROM messages"+
+			" WHERE topic=? AND seqid=? ",
+		topic, seqId)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			// Nothing found - clear the error
+			err = nil
+		}
+		return nil, err
+	}
+
+	msg.From = encodeUidString(msg.From).String()
+	msg.Content = fromJSON(msg.Content)
+
+	return msg, nil
+}
+
 func deviceHasher(deviceID string) string {
 	// Generate custom key as [64-bit hash of device id] to ensure predictable
 	// length of the key

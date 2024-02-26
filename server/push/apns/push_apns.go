@@ -36,6 +36,7 @@ type configType struct {
 	CredentialsPassword string         `json:"credentials_password"`
 	AppTopic            string         `json:"app_topic"`
 	TimeToLive          int            `json:"time_to_live,omitempty"`
+	Env                 string         `json:"env"`
 	CommonConfig        *common.Config `json:"common_config"`
 }
 
@@ -57,8 +58,11 @@ func (h Handler) Init(jsonconf json.RawMessage) (bool, error) {
 		log.Fatal("Cert Error:", err)
 	}
 
-	handler.client = apns2.NewClient(cert).Development() // TODO 上线要切换成线上环境
-	//handler.client = apns2.NewClient(cert).Production()
+	if config.Env == "dev" {
+		handler.client = apns2.NewClient(cert).Development() // TODO 上线要切换成线上环境
+	} else {
+		handler.client = apns2.NewClient(cert).Production()
+	}
 
 	handler.input = make(chan *push.Receipt, bufferSize)
 	handler.channel = make(chan *push.ChannelReq, bufferSize)

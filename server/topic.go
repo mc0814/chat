@@ -10,6 +10,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"sync/atomic"
 	"time"
@@ -2997,20 +2998,6 @@ func (t *Topic) replyDelMsg(sess *Session, asUid types.Uid, asChan bool, msg *Cl
 
 	del := msg.Del
 
-	pud := t.perUser[asUid]
-	if !(pud.modeGiven & pud.modeWant).IsDeleter() {
-		// User must have an R permission: if the user cannot read messages, he has
-		// no business of deleting them.
-		if !(pud.modeGiven & pud.modeWant).IsReader() {
-			sess.queueOut(ErrPermissionDeniedReply(msg, now))
-			return errors.New("del.msg: permission denied")
-		}
-
-		// User has just the R permission, cannot hard-delete messages, silently
-		// switching to soft-deleting
-		del.Hard = false
-	}
-
 	var err error
 	var ranges []types.Range
 	if len(del.DelSeq) == 0 {
@@ -3057,6 +3044,41 @@ func (t *Topic) replyDelMsg(sess *Session, asUid types.Uid, asChan bool, msg *Cl
 	if err != nil {
 		sess.queueOut(ErrMalformedReply(msg, now))
 		return err
+	}
+
+	pud := t.perUser[asUid]
+	topicCat := topicCat(t.name)
+	if !(pud.modeGiven & pud.modeWant).IsDeleter() {
+		fmt.Println(9999999999999999)
+		// User must have an R permission: if the user cannot read messages, he has
+		// no business of deleting them.
+		if !(pud.modeGiven & pud.modeWant).IsReader() {
+			sess.queueOut(ErrPermissionDeniedReply(msg, now))
+			return errors.New("del.msg: permission denied")
+		}
+
+		// User has just the R permission, cannot hard-delete messages, silently
+		// switching to soft-deleting
+		// If delete hard p2p msg or delete myself group message, then do not set soft-deleting
+		if del.Hard == true {
+			if len(ranges) == 1 && ranges[0].Hi == 0 {
+				var chatMsg *types.Message
+				if chatMsg, err = store.Messages.GetMessageByTopicSeqId(t.name, ranges[0].Low); err != nil {
+					err = errors.New("del.msg: can not find msg")
+					sess.queueOut(ErrUnknownReply(msg, now))
+					return err
+				}
+				if chatMsg.From != asUid.String() {
+					if topicCat != types.TopicCatP2P {
+						del.Hard = false
+					} else {
+						err = errors.New("del.msg: cannot delete messages that do not belong to yourself")
+						sess.queueOut(ErrPermissionDeniedReply(msg, now))
+						return err
+					}
+				}
+			}
+		}
 	}
 
 	forUser := asUid

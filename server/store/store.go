@@ -654,6 +654,7 @@ type MessagesPersistenceInterface interface {
 	DeleteList(topic string, delID int, forUser types.Uid, ranges []types.Range) error
 	GetAll(topic string, forUser types.Uid, opt *types.QueryOpt) ([]types.Message, error)
 	GetDeleted(topic string, forUser types.Uid, opt *types.QueryOpt) ([]types.Range, int, error)
+	GetMessageByTopicSeqId(topic string, seqId int) (*types.Message, error)
 }
 
 // messagesMapper is a concrete type implementing MessagesPersistenceInterface.
@@ -774,6 +775,11 @@ func (messagesMapper) GetDeleted(topic string, forUser types.Uid, opt *types.Que
 	ranges = types.RangeSorter(ranges).Normalize()
 
 	return ranges, maxID, nil
+}
+
+// GetMessageByTopicSeqId Get a single message by topic and seqId
+func (messagesMapper) GetMessageByTopicSeqId(topic string, seqId int) (*types.Message, error) {
+	return adp.MessageGetByTopicSeqId(topic, seqId)
 }
 
 // Registered authentication handlers.
