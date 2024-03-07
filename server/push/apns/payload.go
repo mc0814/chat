@@ -22,6 +22,10 @@ const (
 	voipTimeToLive = 10
 	// TTL of a regular push notification in seconds.
 	defaultTimeToLive = 3600
+
+	ACT_AUIDO  = 1
+	ACT_VIDEO  = 2
+	ACT_MISSED = 3
 )
 
 func payloadToData(pl *push.Payload) (map[string]string, error) {
@@ -77,12 +81,20 @@ func payloadToData(pl *push.Payload) (map[string]string, error) {
 		data["rc"], err = drafty.Preview(pl.Content, push.MaxPayloadLength)
 
 		if pl.Webrtc != "" {
+			fmt.Printf("webrtc %v \n", pl.Webrtc)
 			data["webrtc"] = pl.Webrtc
 			if pl.AudioOnly {
 				data["aonly"] = "true"
 				data["content"] = "[AUDIO CALL]"
+				data["act"] = strconv.Itoa(ACT_AUIDO)
 			} else {
 				data["content"] = "[VIDEO CALL]"
+				data["act"] = strconv.Itoa(ACT_VIDEO)
+			}
+			// when Caller hang-up the call
+			if pl.Webrtc == "missed" {
+				data["content"] = "[MISSED CALL]"
+				data["act"] = strconv.Itoa(ACT_MISSED)
 			}
 			// Video call push notifications are silent.
 			data["silent"] = "true"
@@ -236,7 +248,7 @@ func ChannelsForUser(uid t.Uid) []string {
 }
 
 func apnsShouldPresentAlert(what, callStatus, isSilent string, config *configType) bool {
-	return config.Enabled && what != push.ActRead && ((callStatus == "" && isSilent == "") || callStatus == "started")
+	return config.Enabled && what != push.ActRead && ((callStatus == "" && isSilent == "") || (callStatus == "started" || callStatus == "missed"))
 }
 
 func apnsNotificationConfig(what, topic string, data map[string]string, unread int, config *configType, msg apns2.Notification) (apns2.Notification, error) {
@@ -248,7 +260,7 @@ func apnsNotificationConfig(what, topic string, data map[string]string, unread i
 	pushType := apns2.PushTypeAlert
 	priority := 10
 	interruptionLevel := common.InterruptionLevelTimeSensitive
-	if callStatus == "started" {
+	if callStatus == "started" || callStatus == "missed" {
 		// Send VOIP push only when a new call is started, otherwise send normal alert.
 		interruptionLevel = common.InterruptionLevelCritical
 		// FIXME: PushKit notifications do not work with the current FCM adapter.
@@ -301,7 +313,16 @@ func apnsNotificationConfig(what, topic string, data map[string]string, unread i
 
 	fmt.Printf("apspayload: %+v\n", apsPayload.Alert)
 
-	payload, err := json.Marshal(map[string]interface{}{"aps": apsPayload})
+	var tmpPayload map[string]interface{}
+
+	if callStatus == "started" || callStatus == "missed" {
+		tmpPayload = map[string]interface{}{"aps": apsPayload, "act": data["act"]}
+	} else {
+		tmpPayload = map[string]interface{}{"aps": apsPayload}
+	}
+
+	payload, err := json.Marshal(tmpPayload)
+
 	if err != nil {
 		return msg, err
 	}

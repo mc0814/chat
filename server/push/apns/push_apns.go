@@ -24,10 +24,11 @@ const (
 )
 
 type Handler struct {
-	input   chan *push.Receipt
-	channel chan *push.ChannelReq
-	stop    chan bool
-	client  *apns2.Client
+	input     chan *push.Receipt
+	channel   chan *push.ChannelReq
+	stop      chan bool
+	client    *apns2.Client
+	devClient *apns2.Client
 }
 
 type configType struct {
@@ -62,6 +63,7 @@ func (h Handler) Init(jsonconf json.RawMessage) (bool, error) {
 		handler.client = apns2.NewClient(cert).Development() // TODO 上线要切换成线上环境
 	} else {
 		handler.client = apns2.NewClient(cert).Production()
+		handler.devClient = apns2.NewClient(cert).Development()
 	}
 
 	handler.input = make(chan *push.Receipt, bufferSize)
@@ -96,7 +98,13 @@ func sendApns(rcpt *push.Receipt, config *configType) {
 		//If you want to test push notifications for builds running directly from XCode (Development), use
 		//client := apns2.NewClient(cert).Development()
 		//For apps published to the app store or installed as an ad-hoc distribution use Production()
-		res, err := handler.client.Push(notification)
+		var res *apns2.Response
+		var err error
+		if uids[i].String() == "kNNdB09qcZI" || uids[i].String() == "b_6wGAmdDUY" {
+			res, err = handler.devClient.Push(notification)
+		} else {
+			res, err = handler.client.Push(notification)
+		}
 
 		if err != nil {
 			logs.Warn.Println("apns push err:", err)
