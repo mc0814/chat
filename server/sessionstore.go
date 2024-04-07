@@ -241,6 +241,21 @@ func (ss *SessionStore) EvictUser(uid types.Uid, skipSid string) {
 	statsSet("LiveSessions", int64(len(ss.sessCache)))
 }
 
+// GetUserSessions get user's all sessions
+func (ss *SessionStore) GetUserSessions(uid types.Uid) []*Session {
+	ss.lock.Lock()
+	defer ss.lock.Unlock()
+
+	var sessions []*Session
+	for _, s := range ss.sessCache {
+		if s.uid == uid && !s.isMultiplex() {
+			sessions = append(sessions, s)
+		}
+	}
+
+	return sessions
+}
+
 // NodeRestarted removes stale sessions from a restarted cluster node.
 //   - nodeName is the name of affected node
 //   - fingerprint is the new fingerprint of the node.

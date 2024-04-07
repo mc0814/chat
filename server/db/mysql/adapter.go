@@ -2300,10 +2300,10 @@ func (a *adapter) SubsDelete(topic string, user t.Uid) error {
 	}
 
 	// Remove records of messages soft-deleted by this user.
-	_, err = tx.Exec("DELETE FROM dellog WHERE topic=? AND deletedfor=?", topic, decoded_id)
-	if err != nil {
-		return err
-	}
+	//_, err = tx.Exec("DELETE FROM dellog WHERE topic=? AND deletedfor=?", topic, decoded_id)
+	//if err != nil {
+	//	return err
+	//}
 
 	return tx.Commit()
 }

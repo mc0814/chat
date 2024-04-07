@@ -1189,47 +1189,181 @@ func (s *Session) del(msg *ClientComMessage) {
 	// Delete something other than user: topic, subscription, message(s)
 
 	// Expand topic name and validate request.
-	var resp *ServerComMessage
-	msg.RcptTo, resp = s.expandTopicName(msg)
-	if resp != nil {
-		s.queueOut(resp)
-		return
-	}
+	if msg.Del.What == "softDelAllMsg" {
+		// 拿用户所有的会话出来
+		fmt.Printf("%+v\n", s.subs)
+		asUid := types.ParseUserId(msg.AsUser)
+		subs, _ := store.Users.GetTopics(asUid, &types.QueryOpt{})
 
-	if msg.MetaWhat == 0 {
-		s.queueOut(ErrMalformedReply(msg, msg.Timestamp))
-		logs.Warn.Println("s.del: invalid Del action", msg.Del.What, s.sid)
-		return
-	}
+		//rcptTo := s.getSub(msg.AsUser)
+		// 拼接会话数据 包括seqid name
+		// 每一个会话循环删除消息 软删除插入dellog表
+		for _, sub := range subs {
+			msg.Original = sub.Topic
 
-	if sub := s.getSub(msg.RcptTo); sub != nil && msg.MetaWhat != constMsgDelTopic {
-		// Session is attached, deleting subscription or messages. Send to topic.
-		select {
-		case sub.meta <- msg:
-		default:
-			// Reply with a 503 to the user.
-			s.queueOut(ErrServiceUnavailableReply(msg, msg.Timestamp))
-			logs.Err.Println("s.del: sub.meta channel full, topic ", msg.RcptTo, s.sid)
-		}
-	} else if msg.MetaWhat == constMsgDelTopic {
-		// Deleting topic: for sessions attached or not attached, send request to hub first.
-		// Hub will forward to topic, if appropriate.
-		select {
-		case globals.hub.unreg <- &topicUnreg{
-			rcptTo: msg.RcptTo,
-			pkt:    msg,
-			sess:   s,
-			del:    true,
-		}:
-		default:
-			// Reply with a 503 to the user.
-			s.queueOut(ErrServiceUnavailableReply(msg, msg.Timestamp))
-			logs.Err.Println("s.del: hub.unreg channel full", s.sid)
+			forUser := asUid
+			var ranges []types.Range
+			ranges = append(ranges, types.Range{Low: 1, Hi: sub.GetSeqId() + 1})
+			if err := store.Messages.DeleteList(sub.Topic, sub.DelId+1, forUser, ranges); err != nil {
+				s.queueOut(ErrUnknownReply(msg, types.TimeNow()))
+				break
+			}
+			sub.DelId++
+			topic := &Topic{
+				xoriginal: sub.Topic,
+				name:      sub.Topic,
+				perUser:   make(map[types.Uid]perUserData),
+			}
+			topic.perUser[asUid] = perUserData{
+				// Adapter has already swapped the state, public, defaultAccess, lastSeen values.
+				public:    sub.GetPublic(),
+				lastSeen:  sub.GetLastSeen(),
+				lastUA:    sub.GetUserAgent(),
+				topicName: msg.AsUser,
+				private:   sub.Private,
+				modeWant:  sub.ModeWant,
+				modeGiven: sub.ModeGiven,
+				delID:     sub.DelId,
+				recvID:    sub.RecvSeqId,
+				readID:    sub.ReadSeqId,
+			}
+			dr := delrangeDeserialize(ranges)
+			topic.presPubMessageDelete(asUid, sub.ModeGiven&sub.ModeWant, sub.DelId, dr, msg.sess.sid)
+
+			// 直接调用topic方法
+			//if err := topic.replyLeaveUnsub(msg.sess, msg, asUid); err != nil {
+			//	logs.Err.Println("failed to unsub", err, s.sid)
+			//}
+
+			sessions := globals.sessionStore.GetUserSessions(asUid)
+
+			tcat := types.GetTopicCat(sub.Topic)
+			var presSrc string
+
+			if tcat == types.TopicCatMe || tcat == types.TopicCatFnd {
+				continue
+			} else if tcat == types.TopicCatP2P {
+				uid1, uid2, _ := types.ParseP2P(sub.Topic)
+				if uid1 == asUid {
+					presSrc = uid2.UserId()
+				} else {
+					presSrc = uid1.UserId()
+				}
+			} else {
+				if tcat == types.TopicCatGrp {
+					presSrc = types.ChnToGrp(sub.Topic)
+				}
+			}
+
+			//var msgDelRange []MsgDelRange
+			//msgDelRange = append(msgDelRange, MsgDelRange{LowId: 1, HiId: sub.GetSeqId() + 1})
+
+			for _, session := range sessions {
+				sendMsg := &ServerComMessage{
+					// Topic is 'me' even for group topics; group topics will use 'me' as a signal to drop the message
+					// without forwarding to sessions
+					// 这个通知会话删除的
+					//Pres: &MsgServerPres{
+					//	Topic: "me",
+					//	What:  "gone",
+					//	Src:   presSrc,
+					//},
+					// 这个是通知会话软删除消息的
+					Pres: &MsgServerPres{
+						Topic:  presSrc,
+						What:   "del",
+						DelId:  sub.DelId,
+						Src:    asUid.UserId(),
+						DelSeq: dr,
+					},
+				}
+
+				session.queueOut(sendMsg)
+
+				readMsg := &ServerComMessage{
+					// 通知会话更新已读条数
+					Pres: &MsgServerPres{
+						Topic: "me",
+						What:  "read",
+						Src:   presSrc,
+						SeqId: sub.GetSeqId(),
+					},
+				}
+				session.queueOut(readMsg)
+			}
+
+			//presSubsOfflineOffline(sub.Topic, types.TopicCatGrp, []types.Subscription{sub}, "gone", &presParams{}, s.sid)
+
+			s.queueOut(NoContentParams(msg.Id, sub.Topic, types.TimeNow(), msg.Timestamp, map[string]string{"what": "softDelAllMsg"}))
+
+			//select {
+			//globals.hub.unreg <- &topicUnreg{
+			//	rcptTo: sub.Topic,
+			//	pkt:    msg,
+			//	sess:   s,
+			//	del:    true,
+			//}
+			//fmt.Println(sub.Topic)
+			//default:
+			//	// Reply with a 503 to the user.
+			//	s.queueOut(ErrServiceUnavailableReply(msg, msg.Timestamp))
+			//	logs.Err.Println("s.del: hub.unreg channel full", s.sid)
+			//	break
+			//}
+
+			//s.subscribe(msg)
+			//fmt.Printf("%+v\n", s.subs)
+			//msg.Del.DelSeq =
+			//select {
+			//case rcptTo.meta <- msg:
+			//default:
+			//	// Reply with a 503 to the user.
+			//	s.queueOut(ErrServiceUnavailableReply(msg, msg.Timestamp))
+			//	logs.Err.Println("s.del: sub.meta channel full, topic ", msg.RcptTo, s.sid)
+			//}
 		}
 	} else {
-		// Must join the topic to delete messages or subscriptions.
-		s.queueOut(ErrAttachFirst(msg, msg.Timestamp))
-		logs.Warn.Println("s.del: invalid Del action while unsubbed", msg.Del.What, s.sid)
+		var resp *ServerComMessage
+		msg.RcptTo, resp = s.expandTopicName(msg)
+		if resp != nil {
+			s.queueOut(resp)
+			return
+		}
+		if msg.MetaWhat == 0 {
+			s.queueOut(ErrMalformedReply(msg, msg.Timestamp))
+			logs.Warn.Println("s.del: invalid Del action", msg.Del.What, s.sid)
+			return
+		}
+
+		if sub := s.getSub(msg.RcptTo); sub != nil && msg.MetaWhat != constMsgDelTopic {
+			// Session is attached, deleting subscription or messages. Send to topic.
+			select {
+			case sub.meta <- msg:
+			default:
+				// Reply with a 503 to the user.
+				s.queueOut(ErrServiceUnavailableReply(msg, msg.Timestamp))
+				logs.Err.Println("s.del: sub.meta channel full, topic ", msg.RcptTo, s.sid)
+			}
+		} else if msg.MetaWhat == constMsgDelTopic {
+			// Deleting topic: for sessions attached or not attached, send request to hub first.
+			// Hub will forward to topic, if appropriate.
+			select {
+			case globals.hub.unreg <- &topicUnreg{
+				rcptTo: msg.RcptTo,
+				pkt:    msg,
+				sess:   s,
+				del:    true,
+			}:
+			default:
+				// Reply with a 503 to the user.
+				s.queueOut(ErrServiceUnavailableReply(msg, msg.Timestamp))
+				logs.Err.Println("s.del: hub.unreg channel full", s.sid)
+			}
+		} else {
+			// Must join the topic to delete messages or subscriptions.
+			s.queueOut(ErrAttachFirst(msg, msg.Timestamp))
+			logs.Warn.Println("s.del: invalid Del action while unsubbed", msg.Del.What, s.sid)
+		}
 	}
 }
 

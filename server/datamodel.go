@@ -222,7 +222,7 @@ func parseMsgClientMeta(params string) int {
 
 func parseMsgClientDel(params string) int {
 	switch params {
-	case "", "msg":
+	case "", "msg", "softDelAllMsg":
 		return constMsgDelMsg
 	case "topic":
 		return constMsgDelTopic

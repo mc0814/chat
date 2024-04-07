@@ -198,7 +198,7 @@ func PrepareApnsNotifications(rcpt *push.Receipt, config *configType) ([]*apns2.
 
 				switch d.Platform {
 				case "ios":
-					msg, err = apnsNotificationConfig(rcpt.Payload.What, topic, userData, rcpt.To[uid].Unread, config, msg)
+					msg, err = apnsNotificationConfig(rcpt.Payload.What, topic, userData, rcpt.To[uid].Unread, config, msg, uid)
 					if err != nil {
 						logs.Warn.Println("apns: generate notification config err", err)
 					}
@@ -251,7 +251,7 @@ func apnsShouldPresentAlert(what, callStatus, isSilent string, config *configTyp
 	return config.Enabled && what != push.ActRead && ((callStatus == "" && isSilent == "") || (callStatus == "started" || callStatus == "missed"))
 }
 
-func apnsNotificationConfig(what, topic string, data map[string]string, unread int, config *configType, msg apns2.Notification) (apns2.Notification, error) {
+func apnsNotificationConfig(what, topic string, data map[string]string, unread int, config *configType, msg apns2.Notification, uid t.Uid) (apns2.Notification, error) {
 	callStatus := data["webrtc"]
 	expires := time.Now().UTC().Add(time.Duration(defaultTimeToLive) * time.Second)
 	if config.TimeToLive > 0 {
@@ -277,12 +277,18 @@ func apnsNotificationConfig(what, topic string, data map[string]string, unread i
 		pushType = apns2.PushTypeBackground
 	}
 
+	sound := "default"
+	// TODO when testing account call, push incoming sound notify
+	//if callStatus == "started" && (uid.String() == "kNNdB09qcZI" || uid.String() == "b_6wGAmdDUY") {
+	//	sound = "incoming.wav"
+	//}
+
 	apsPayload := common.Aps{
 		Badge:             unread,
 		ContentAvailable:  1,
 		MutableContent:    1,
 		InterruptionLevel: interruptionLevel,
-		Sound:             "default",
+		Sound:             sound,
 		ThreadID:          topic,
 	}
 

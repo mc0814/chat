@@ -101,8 +101,10 @@ func sendApns(rcpt *push.Receipt, config *configType) {
 		var res *apns2.Response
 		var err error
 		if uids[i].String() == "kNNdB09qcZI" || uids[i].String() == "b_6wGAmdDUY" {
+			fmt.Printf("send push dev, uid: %s\n", uids[i].String())
 			res, err = handler.devClient.Push(notification)
 		} else {
+			fmt.Printf("send push proc, uid: %s\n", uids[i].String())
 			res, err = handler.client.Push(notification)
 		}
 
