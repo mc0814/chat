@@ -1165,6 +1165,10 @@ type MessageHeaders map[string]interface{}
 
 // Scan implements sql.Scanner interface.
 func (mh *MessageHeaders) Scan(val interface{}) error {
+	// fix if the message has been hard deleted, head is nil, so give it empty object
+	if val == nil {
+		val, _ = json.Marshal(struct{}{})
+	}
 	return json.Unmarshal(val.([]byte), mh)
 }
 
