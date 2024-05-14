@@ -158,6 +158,9 @@ type Adapter interface {
 	// MessageGetDeleted returns a list of deleted message Ids.
 	MessageGetDeleted(topic string, forUser t.Uid, opts *t.QueryOpt) ([]t.DelMessage, error)
 	MessageGetByTopicSeqId(topic string, seqId int) (*t.Message, error)
+	MessageListByTopicSeqIdRange(topic string, forUser t.Uid, seqIdStart int, seqIdEnd int) ([]t.Message, error)
+	MessageUpdate(topic string, seqId int, expired time.Time) error
+	MessageExpiredList() ([]t.Message, error)
 
 	// Devices (for push notifications)
 

@@ -53,7 +53,7 @@ type node struct {
 	children []*node
 }
 
-type previewState struct {
+type PreviewState struct {
 	drafty    *document
 	maxLength int
 	keymap    map[int]int
@@ -80,7 +80,7 @@ func Preview(content interface{}, length int) (string, error) {
 		return "", nil
 	}
 
-	state := previewState{
+	state := PreviewState{
 		drafty: &document{
 			Fmt: make([]style, 0, len(doc.Fmt)),
 			Ent: make([]entity, 0, len(doc.Ent)),
@@ -96,6 +96,28 @@ func Preview(content interface{}, length int) (string, error) {
 	state.drafty.Txt = string(state.drafty.txt)
 	data, err := json.Marshal(state.drafty)
 	return string(data), err
+}
+
+func GetMentionUsers(content interface{}) ([]string, error) {
+	var users []string
+	doc, err := decodeAsDrafty(content)
+	if err != nil {
+		return users, err
+	}
+	if doc == nil {
+		return users, nil
+	}
+
+	for i := range doc.Ent {
+		if doc.Ent[i].Tp == "MN" {
+			if user, ok := nullableMapGet(doc.Ent[i].Data, "id"); ok {
+				users = append(users, user)
+			}
+		}
+	}
+
+	return users, nil
+
 }
 
 type plainTextState struct {
@@ -342,7 +364,7 @@ func plainTextFormatter(n *node, ctx interface{}) error {
 // previewFormatter converts a tree of formatted spans into a shortened drafty document.
 func previewFormatter(n *node, ctx interface{}) error {
 
-	state := ctx.(*previewState)
+	state := ctx.(*PreviewState)
 	at := len(state.drafty.txt)
 	if at >= state.maxLength {
 		// Maximum doc length reached.

@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"github.com/tinode/chat/server/drafty"
 	"strings"
 
 	"github.com/tinode/chat/server/logs"
@@ -430,15 +432,42 @@ func (s *Session) presTermDirect(subs []string) {
 // Case T: message sent, "msg" to all with 'R'
 // Case W.1: messages hard-deleted, "del" to all with 'R'
 func (t *Topic) presSubsOffline(what string, params *presParams,
-	filterSource *presFilters, filterTarget *presFilters, skipSid string, offlineOnly bool) {
+	filterSource *presFilters, filterTarget *presFilters, skipSid string, offlineOnly bool, msg *ServerComMessage) {
 	var skipTopic string
 	if offlineOnly {
 		skipTopic = t.name
 	}
 
 	for uid, pud := range t.perUser {
-		if pud.deleted || !presOfflineFilter(pud.modeGiven&pud.modeWant, what, filterSource) {
+		if pud.deleted {
 			continue
+		}
+		if !presOfflineFilter(pud.modeGiven&pud.modeWant, what, filterSource) {
+			fmt.Println("skip", uid)
+			if msg.Data != nil {
+				mentionUsers, err := drafty.GetMentionUsers(msg.Data.Content)
+				if err != nil {
+					logs.Err.Printf("topic[%s]: failed to send message: %v", t.name, err)
+					continue
+				}
+				userID := uid.UserId()
+				isSkip := true
+				if len(mentionUsers) > 0 {
+					for _, user := range mentionUsers {
+						if user == userID {
+							fmt.Println("do not skip", uid)
+							isSkip = false
+							break
+						}
+					}
+				}
+
+				if isSkip {
+					continue
+				}
+			} else {
+				continue
+			}
 		}
 
 		user := uid.UserId()

@@ -655,6 +655,9 @@ type MessagesPersistenceInterface interface {
 	GetAll(topic string, forUser types.Uid, opt *types.QueryOpt) ([]types.Message, error)
 	GetDeleted(topic string, forUser types.Uid, opt *types.QueryOpt) ([]types.Range, int, error)
 	GetMessageByTopicSeqId(topic string, seqId int) (*types.Message, error)
+	GetListBySeqIdRange(topic string, forUser types.Uid, seqIdStart int, seqIdEnd int) ([]types.Message, error)
+	UpdateMessage(topic string, seqId int, expired time.Time) error
+	GetExpiredList() ([]types.Message, error)
 }
 
 // messagesMapper is a concrete type implementing MessagesPersistenceInterface.
@@ -780,6 +783,21 @@ func (messagesMapper) GetDeleted(topic string, forUser types.Uid, opt *types.Que
 // GetMessageByTopicSeqId Get a single message by topic and seqId
 func (messagesMapper) GetMessageByTopicSeqId(topic string, seqId int) (*types.Message, error) {
 	return adp.MessageGetByTopicSeqId(topic, seqId)
+}
+
+// GetListBySeqIdRange Get message list by topic and seqId range
+func (messagesMapper) GetListBySeqIdRange(topic string, forUser types.Uid, seqIdStart int, seqIdEnd int) ([]types.Message, error) {
+	return adp.MessageListByTopicSeqIdRange(topic, forUser, seqIdStart, seqIdEnd)
+}
+
+// UpdateMessage Update message expired
+func (messagesMapper) UpdateMessage(topic string, seqId int, expired time.Time) error {
+	return adp.MessageUpdate(topic, seqId, expired)
+}
+
+// GetExpiredList Get all expired messages
+func (messagesMapper) GetExpiredList() ([]types.Message, error) {
+	return adp.MessageExpiredList()
 }
 
 // Registered authentication handlers.

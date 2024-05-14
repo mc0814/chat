@@ -284,12 +284,13 @@ func initTopicP2P(t *Topic, sreg *ClientComMessage) error {
 				lastUA:    subs[i].GetUserAgent(),
 				topicName: types.ParseUid(subs[(i+1)%2].User).UserId(),
 
-				private:   subs[i].Private,
-				modeWant:  subs[i].ModeWant,
-				modeGiven: subs[i].ModeGiven,
-				delID:     subs[i].DelId,
-				recvID:    subs[i].RecvSeqId,
-				readID:    subs[i].ReadSeqId,
+				private:      subs[i].Private,
+				modeWant:     subs[i].ModeWant,
+				modeGiven:    subs[i].ModeGiven,
+				delID:        subs[i].DelId,
+				recvID:       subs[i].RecvSeqId,
+				readID:       subs[i].ReadSeqId,
+				expirePeriod: subs[i].ExpirePeriod,
 			}
 		}
 	} else {
@@ -474,17 +475,19 @@ func initTopicP2P(t *Topic, sreg *ClientComMessage) error {
 		userData.delID = sub1.DelId
 		userData.readID = sub1.ReadSeqId
 		userData.recvID = sub1.RecvSeqId
+		userData.expirePeriod = sub1.ExpirePeriod
 		t.perUser[userID1] = userData
 
 		t.perUser[userID2] = perUserData{
-			public:    sub2.GetPublic(),
-			trusted:   sub2.GetTrusted(),
-			topicName: userID1.UserId(),
-			modeWant:  sub2.ModeWant,
-			modeGiven: sub2.ModeGiven,
-			delID:     sub2.DelId,
-			readID:    sub2.ReadSeqId,
-			recvID:    sub2.RecvSeqId,
+			public:       sub2.GetPublic(),
+			trusted:      sub2.GetTrusted(),
+			topicName:    userID1.UserId(),
+			modeWant:     sub2.ModeWant,
+			modeGiven:    sub2.ModeGiven,
+			delID:        sub2.DelId,
+			readID:       sub2.ReadSeqId,
+			recvID:       sub2.RecvSeqId,
+			expirePeriod: sub2.ExpirePeriod,
 		}
 	}
 
@@ -714,12 +717,13 @@ func (t *Topic) loadSubscribers() error {
 		sub := &subs[i]
 		uid := types.ParseUid(sub.User)
 		t.perUser[uid] = perUserData{
-			delID:     sub.DelId,
-			readID:    sub.ReadSeqId,
-			recvID:    sub.RecvSeqId,
-			private:   sub.Private,
-			modeWant:  sub.ModeWant,
-			modeGiven: sub.ModeGiven,
+			delID:        sub.DelId,
+			readID:       sub.ReadSeqId,
+			recvID:       sub.RecvSeqId,
+			private:      sub.Private,
+			modeWant:     sub.ModeWant,
+			modeGiven:    sub.ModeGiven,
+			expirePeriod: sub.ExpirePeriod,
 		}
 
 		if (sub.ModeGiven & sub.ModeWant).IsOwner() {

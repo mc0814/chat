@@ -55,6 +55,8 @@ type MsgSetSub struct {
 
 	// Access mode change, either Given or Want depending on context
 	Mode string `json:"mode,omitempty"`
+
+	ExpirePeriod int `json:"expirePeriod,omitempty"`
 }
 
 // MsgSetDesc is a C2S in set.what == "desc", acc, sub message.
@@ -253,11 +255,12 @@ type MsgClientLeave struct {
 
 // MsgClientPub is client's request to publish data to topic subscribers {pub}.
 type MsgClientPub struct {
-	Id      string         `json:"id,omitempty"`
-	Topic   string         `json:"topic"`
-	NoEcho  bool           `json:"noecho,omitempty"`
-	Head    map[string]any `json:"head,omitempty"`
-	Content any            `json:"content"`
+	Id           string         `json:"id,omitempty"`
+	Topic        string         `json:"topic"`
+	NoEcho       bool           `json:"noecho,omitempty"`
+	Head         map[string]any `json:"head,omitempty"`
+	Content      any            `json:"content"`
+	ExpirePeriod int            `json:"expirePeriod,omitempty"`
 }
 
 // MsgClientGet is a query of topic state {get}.
@@ -440,7 +443,8 @@ type MsgTopicDesc struct {
 	Public  any `json:"public,omitempty"`
 	Trusted any `json:"trusted,omitempty"`
 	// Per-subscription private data
-	Private any `json:"private,omitempty"`
+	Private      any `json:"private,omitempty"`
+	ExpirePeriod int `json:"expirePeriod,omitempty"`
 }
 
 func (src *MsgTopicDesc) describe() string {
@@ -590,13 +594,15 @@ type MsgServerData struct {
 	Topic    string      `json:"topic"`
 	TopicPub interface{} `json:"topic_pub,omitempty"`
 	// ID of the user who originated the message as {pub}, could be empty if sent by the system
-	From      string         `json:"from,omitempty"`
-	FromPub   interface{}    `json:"from_pub,omitempty"`
-	Timestamp time.Time      `json:"ts"`
-	DeletedAt *time.Time     `json:"deleted,omitempty"`
-	SeqId     int            `json:"seq"`
-	Head      map[string]any `json:"head,omitempty"`
-	Content   any            `json:"content"`
+	From         string         `json:"from,omitempty"`
+	FromPub      interface{}    `json:"from_pub,omitempty"`
+	Timestamp    time.Time      `json:"ts"`
+	DeletedAt    *time.Time     `json:"deleted,omitempty"`
+	SeqId        int            `json:"seq"`
+	Head         map[string]any `json:"head,omitempty"`
+	Content      any            `json:"content"`
+	ExpirePeriod int            `json:"expirePeriod,omitempty"`
+	ExpiredAt    *time.Time     `json:"expired,omitempty"`
 }
 
 // Deep-shallow copy.
@@ -632,6 +638,10 @@ type MsgServerPres struct {
 	DelSeq    []MsgDelRange `json:"delseq,omitempty"`
 	AcsTarget string        `json:"tgt,omitempty"`
 	AcsActor  string        `json:"act,omitempty"`
+	// message expire field
+	ExpirePeriod int        `json:"expirePeriod,omitempty"`
+	ExpiredAt    *time.Time `json:"expired,omitempty"`
+	From         string     `json:"from,omitempty"`
 	// Acs or a delta Acs. Need to marshal it to json under a name different than 'acs'
 	// to allow different handling on the client
 	Acs *MsgAccessMode `json:"dacs,omitempty"`

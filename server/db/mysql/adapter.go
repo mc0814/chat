@@ -1680,6 +1680,11 @@ func (a *adapter) TopicsForUser(uid t.Uid, keepDeleted bool, opts *t.QueryOpt) (
 	if err != nil {
 		return nil, err
 	}
+	//
+	//test := encodeUidString("1238977527347679232")
+	//test2 := encodeUidString("1258909425616293888")
+	//testtt := test.P2PName(test2)
+	//fmt.Println(testtt)
 
 	var subs []t.Subscription
 	if len(join) == 0 {
@@ -1817,7 +1822,7 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 
 	// Fetch all subscribed users. The number of users is not large
 	q := `SELECT s.createdat,s.updatedat,s.deletedat,s.userid,s.topic,s.delid,s.recvseqid,
-		s.readseqid,s.modewant,s.modegiven,u.public,u.trusted,u.lastseen,u.useragent,s.private
+		s.readseqid,s.modewant,s.modegiven,u.public,u.trusted,u.lastseen,u.useragent,s.private,s.expireperiod
 		FROM subscriptions AS s JOIN users AS u ON s.userid=u.id
 		WHERE s.topic=?`
 	args := []any{topic}
@@ -1875,7 +1880,7 @@ func (a *adapter) UsersForTopic(topic string, keepDeleted bool, opts *t.QueryOpt
 			&sub.CreatedAt, &sub.UpdatedAt, &sub.DeletedAt,
 			&sub.User, &sub.Topic, &sub.DelId, &sub.RecvSeqId,
 			&sub.ReadSeqId, &sub.ModeWant, &sub.ModeGiven,
-			&public, &trusted, &lastSeen, &userAgent, &sub.Private); err != nil {
+			&public, &trusted, &lastSeen, &userAgent, &sub.Private, &sub.ExpirePeriod); err != nil {
 			break
 		}
 
@@ -2180,7 +2185,7 @@ func (a *adapter) SubsForUser(forUser t.Uid) ([]t.Subscription, error) {
 // the latter does not.
 func (a *adapter) SubsForTopic(topic string, keepDeleted bool, opts *t.QueryOpt) ([]t.Subscription, error) {
 	q := `SELECT createdat,updatedat,deletedat,userid AS user,topic,delid,recvseqid,
-		readseqid,modewant,modegiven,private FROM subscriptions WHERE topic=?`
+		readseqid,modewant,modegiven,private,expireperiod FROM subscriptions WHERE topic=?`
 
 	args := []any{topic}
 	if !keepDeleted {
@@ -2542,9 +2547,9 @@ func (a *adapter) MessageSave(msg *t.Message) error {
 	// Using a sequential ID provided by the database.
 	res, err := a.db.ExecContext(
 		ctx,
-		"INSERT INTO messages(createdAt,updatedAt,seqid,topic,`from`,head,content) VALUES(?,?,?,?,?,?,?)",
+		"INSERT INTO messages(createdAt,updatedAt,seqid,topic,`from`,head,content,expireperiod) VALUES(?,?,?,?,?,?,?,?)",
 		msg.CreatedAt, msg.UpdatedAt, msg.SeqId, msg.Topic,
-		store.DecodeUid(t.ParseUid(msg.From)), msg.Head, toJSON(msg.Content))
+		store.DecodeUid(t.ParseUid(msg.From)), msg.Head, toJSON(msg.Content), msg.ExpirePeriod)
 	if err == nil {
 		id, _ := res.LastInsertId()
 		// Replacing ID given by store by ID given by the DB.
@@ -2579,7 +2584,7 @@ func (a *adapter) MessageGetAll(topic string, forUser t.Uid, opts *t.QueryOpt) (
 	}
 	rows, err := a.db.QueryxContext(
 		ctx,
-		"SELECT m.createdat,m.updatedat,m.deletedat,m.delid,m.seqid,m.topic,m.`from`,m.head,m.content"+
+		"SELECT m.createdat,m.updatedat,m.deletedat,m.delid,m.seqid,m.topic,m.`from`,m.head,m.content,m.expireperiod,m.expiredat"+
 			" FROM messages AS m LEFT JOIN dellog AS d"+
 			" ON d.topic=m.topic AND m.seqid BETWEEN d.low AND d.hi-1 AND d.deletedfor=?"+
 			" WHERE m.delid=0 AND m.topic=? AND m.seqid BETWEEN ? AND ? AND d.deletedfor IS NULL"+
@@ -2808,6 +2813,89 @@ func (a *adapter) MessageGetByTopicSeqId(topic string, seqId int) (*t.Message, e
 	msg.Content = fromJSON(msg.Content)
 
 	return msg, nil
+}
+
+// MessageListByTopicSeqIdRange get message list by topic and seqId range
+func (a *adapter) MessageListByTopicSeqIdRange(topic string, forUser t.Uid, seqIdStart int, seqIdEnd int) ([]t.Message, error) {
+	ctx, cancel := a.getContext()
+	if cancel != nil {
+		defer cancel()
+	}
+
+	unum := store.DecodeUid(forUser)
+
+	rows, err := a.db.QueryxContext(
+		ctx,
+		"SELECT *"+
+			" FROM messages"+
+			" WHERE topic=? AND seqid between ? and ? and deletedat is null and expireperiod > 0 and expiredat is null and `from`!=?",
+		topic, seqIdStart, seqIdEnd, unum)
+
+	if err != nil {
+		return nil, err
+	}
+
+	var msgs []t.Message
+	for rows.Next() {
+		var msg t.Message
+		if err = rows.StructScan(&msg); err != nil {
+			break
+		}
+		msg.From = encodeUidString(msg.From).String()
+		msg.Content = fromJSON(msg.Content)
+		msgs = append(msgs, msg)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	return msgs, err
+}
+
+func (a *adapter) MessageUpdate(topic string, seqId int, expired time.Time) error {
+	ctx, cancel := a.getContext()
+	if cancel != nil {
+		defer cancel()
+	}
+	_, err := a.db.ExecContext(ctx, "UPDATE messages AS m SET m.expiredat=? WHERE topic=? and seqid = ?",
+		expired, topic, seqId)
+
+	return err
+}
+
+// MessageExpiredList return all expired message
+func (a *adapter) MessageExpiredList() ([]t.Message, error) {
+	ctx, cancel := a.getContext()
+	if cancel != nil {
+		defer cancel()
+	}
+
+	rows, err := a.db.QueryxContext(
+		ctx,
+		"SELECT *"+
+			" FROM messages"+
+			" WHERE deletedat is null and expireperiod > 0 and expiredat <= UTC_TIMESTAMP()"+
+			" Order by topic, seqid")
+
+	if err != nil {
+		return nil, err
+	}
+
+	var msgs []t.Message
+	for rows.Next() {
+		var msg t.Message
+		if err = rows.StructScan(&msg); err != nil {
+			break
+		}
+		msg.From = encodeUidString(msg.From).String()
+		msg.Content = fromJSON(msg.Content)
+		msgs = append(msgs, msg)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	return msgs, err
 }
 
 func deviceHasher(deviceID string) string {

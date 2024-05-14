@@ -8,6 +8,9 @@
 package main
 
 import (
+	"github.com/tinode/chat/server/drafty"
+	"github.com/tinode/chat/server/logs"
+	"github.com/tinode/chat/server/store"
 	"time"
 
 	"github.com/tinode/chat/server/push"
@@ -68,14 +71,39 @@ func (t *Topic) pushForData(fromUid types.Uid, data *MsgServerData, msgMarkedAsR
 
 		// Send only to those who have notifications enabled.
 		mode := pud.modeWant & pud.modeGiven
-		if mode.IsPresencer() && mode.IsReader() && !pud.deleted && !pud.isChan {
-			receipt.To[uid] = push.Recipient{
-				// Number of attached sessions the data message will be delivered to.
-				// Push notifications sent to users with non-zero online sessions will be marked silent.
-				Delivered: online,
-				// Unread counts are incremented for all recipients,
-				// and for sender only if the message wasnt't marked 'read' by the sender
-				ShouldIncrementUnreadCountInCache: uid != fromUid || !msgMarkedAsReadBySender,
+		if mode.IsReader() && !pud.deleted && !pud.isChan {
+			if mode.IsPresencer() {
+				receipt.To[uid] = push.Recipient{
+					// Number of attached sessions the data message will be delivered to.
+					// Push notifications sent to users with non-zero online sessions will be marked silent.
+					Delivered: online,
+					// Unread counts are incremented for all recipients,
+					// and for sender only if the message wasnt't marked 'read' by the sender
+					ShouldIncrementUnreadCountInCache: uid != fromUid || !msgMarkedAsReadBySender,
+				}
+			} else {
+				mentionUsers, err := drafty.GetMentionUsers(data.Content)
+				if err != nil {
+					logs.Err.Printf("topic[%s]: failed to send message: %v", t.name, err)
+					return nil
+				}
+
+				userID := uid.UserId()
+				if len(mentionUsers) > 0 {
+					for _, user := range mentionUsers {
+						if user == userID {
+							receipt.To[uid] = push.Recipient{
+								// Number of attached sessions the data message will be delivered to.
+								// Push notifications sent to users with non-zero online sessions will be marked silent.
+								Delivered: online,
+								// Unread counts are incremented for all recipients,
+								// and for sender only if the message wasnt't marked 'read' by the sender
+								ShouldIncrementUnreadCountInCache: uid != fromUid || !msgMarkedAsReadBySender,
+							}
+							break
+						}
+					}
+				}
 			}
 		}
 	}
@@ -229,4 +257,35 @@ func sendPush(rcpt *push.Receipt) {
 		default:
 		}
 	}
+}
+
+// get username from payload.From
+func getUserNameByUid(uid types.Uid) string {
+	var userPublic interface{}
+	username := ""
+
+	if uid.IsZero() {
+		logs.Warn.Println("apns parse uid.IsZero")
+		return ""
+	}
+
+	suser, err := store.Users.Get(uid)
+	if err != nil {
+		logs.Warn.Println("apns get user error: ", err)
+		return ""
+	}
+	if suser == nil {
+		logs.Warn.Println("apns user not found")
+		return ""
+	}
+	userPublic = suser.Public
+
+	if userInfo, ok := userPublic.(map[string]interface{}); ok {
+		if username, ok = userInfo["fn"].(string); !ok {
+			logs.Warn.Println("apns parse user info fail")
+			return ""
+		}
+	}
+
+	return username
 }

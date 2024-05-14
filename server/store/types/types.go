@@ -901,6 +901,8 @@ type Subscription struct {
 	// User's private data associated with the subscription to topic
 	Private interface{}
 
+	ExpirePeriod int
+
 	// Deserialized ephemeral values
 
 	// Deserialized public value from topic or user (depends on context)
@@ -1189,9 +1191,11 @@ type Message struct {
 	SeqId      int
 	Topic      string
 	// Sender's user ID as string (without 'usr' prefix), could be empty.
-	From    string
-	Head    MessageHeaders `json:"Head,omitempty" bson:",omitempty"`
-	Content interface{}
+	From         string
+	Head         MessageHeaders `json:"Head,omitempty" bson:",omitempty"`
+	Content      interface{}
+	ExpirePeriod int        `json:"expirePeriod,omitempty" bson:",omitempty"`
+	ExpiredAt    *time.Time `json:"ExpiredAt,omitempty" bson:",omitempty"`
 }
 
 // Range is a range of message SeqIDs. Low end is inclusive (closed), high end is exclusive (open): [Low, Hi).

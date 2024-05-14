@@ -11,7 +11,9 @@ package main
 import (
 	"errors"
 	"fmt"
+	"github.com/tinode/chat/server/drafty"
 	"sort"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -154,6 +156,8 @@ type perUserData struct {
 
 	// The user is a channel subscriber.
 	isChan bool
+
+	expirePeriod int
 }
 
 // perSubsData holds user's (on 'me' topic) cache of subscription data
@@ -499,7 +503,7 @@ func (t *Topic) handleTopicTimeout(hub *Hub, currentUA string, uaTimer, defrNoti
 		uaTimer.Stop()
 		t.presUsersOfInterest("off", currentUA)
 	} else if t.cat == types.TopicCatGrp {
-		t.presSubsOffline("off", nilPresParams, nilPresFilters, nilPresFilters, "", false)
+		t.presSubsOffline("off", nilPresParams, nilPresFilters, nilPresFilters, "", false, &ServerComMessage{})
 	}
 }
 
@@ -512,7 +516,7 @@ func (t *Topic) handleTopicTermination(sd *shutDown) {
 
 	if sd.reason == StopDeleted {
 		if t.cat == types.TopicCatGrp {
-			t.presSubsOffline("gone", nilPresParams, nilPresFilters, nilPresFilters, "", false)
+			t.presSubsOffline("gone", nilPresParams, nilPresFilters, nilPresFilters, "", false, &ServerComMessage{})
 		}
 		// P2P users get "off+remove" earlier in the process
 
@@ -951,7 +955,7 @@ func (t *Topic) sendSubNotifications(asUid types.Uid, sid, userAgent string) {
 			}
 
 			// Notify topic subscribers that the topic is online now.
-			t.presSubsOffline(status, nilPresParams, nilPresFilters, nilPresFilters, "", false)
+			t.presSubsOffline(status, nilPresParams, nilPresFilters, nilPresFilters, "", false, &ServerComMessage{})
 		} else if pud.online == 1 {
 			// If this is the first session of the user in the topic.
 			// Notify other online group members that the user is online now.
@@ -986,14 +990,25 @@ func (t *Topic) saveAndBroadcastMessage(msg *ClientComMessage, asUid types.Uid, 
 	}
 
 	markedReadBySender := false
+	// first use server msg expire period
+	expirePeriod := msg.Pub.ExpirePeriod
+	if pud.expirePeriod != msg.Pub.ExpirePeriod {
+		expirePeriod = pud.expirePeriod
+	}
+	// TODO ios 上线可取消注释，并且更改数据库默认值 -1 改 86400
+	if expirePeriod <= 0 {
+		expirePeriod = 86400
+	}
+
 	if err, unreadUpdated := store.Messages.Save(
 		&types.Message{
-			ObjHeader: types.ObjHeader{CreatedAt: msg.Timestamp},
-			SeqId:     t.lastID + 1,
-			Topic:     t.name,
-			From:      asUid.String(),
-			Head:      head,
-			Content:   content,
+			ObjHeader:    types.ObjHeader{CreatedAt: msg.Timestamp},
+			SeqId:        t.lastID + 1,
+			Topic:        t.name,
+			From:         asUid.String(),
+			Head:         head,
+			Content:      content,
+			ExpirePeriod: expirePeriod,
 		}, attachments, (pud.modeGiven & pud.modeWant).IsReader()); err != nil {
 		logs.Warn.Printf("topic[%s]: failed to save message: %v", t.name, err)
 		msg.sess.queueOut(ErrUnknown(msg.Id, t.original(asUid), msg.Timestamp))
@@ -1020,12 +1035,13 @@ func (t *Topic) saveAndBroadcastMessage(msg *ClientComMessage, asUid types.Uid, 
 
 	data := &ServerComMessage{
 		Data: &MsgServerData{
-			Topic:     msg.Original,
-			From:      msg.AsUser,
-			Timestamp: msg.Timestamp,
-			SeqId:     t.lastID,
-			Head:      head,
-			Content:   content,
+			Topic:        msg.Original,
+			From:         msg.AsUser,
+			Timestamp:    msg.Timestamp,
+			SeqId:        t.lastID,
+			Head:         head,
+			Content:      content,
+			ExpirePeriod: expirePeriod,
 		},
 		// Internal-only values.
 		Id:        msg.Id,
@@ -1049,7 +1065,7 @@ func (t *Topic) saveAndBroadcastMessage(msg *ClientComMessage, asUid types.Uid, 
 
 	// Message sent: notify offline 'R' subscrbers on 'me'.
 	t.presSubsOffline("msg", &presParams{seqID: t.lastID, actor: msg.AsUser},
-		&presFilters{filterIn: types.ModeRead}, nilPresFilters, "", true)
+		&presFilters{filterIn: types.ModeRead}, nilPresFilters, "", true, data)
 
 	// Tell the plugins that a message was accepted for delivery
 	pluginMessage(data.Data, plgActCreate)
@@ -1155,9 +1171,16 @@ func (t *Topic) handleNoteBroadcast(msg *ClientComMessage) {
 
 	var read, recv, unread, seq int
 
+	var unreadMsgs []types.Message
+
 	if msg.Note.What == "read" {
 		if msg.Note.SeqId <= pud.readID {
 			// No need to report stale or bogus read status.
+			return
+		}
+
+		if unreadMsgs, err = store.Messages.GetListBySeqIdRange(t.name, asUid, pud.readID+1, msg.Note.SeqId); err != nil {
+			logs.Warn.Printf("topic[%s]: failed to get unread message: %v", t.name, err)
 			return
 		}
 
@@ -1242,6 +1265,74 @@ func (t *Topic) handleNoteBroadcast(msg *ClientComMessage) {
 	}
 
 	t.broadcastToSessions(info)
+
+	if len(unreadMsgs) > 0 {
+		now := types.TimeNow()
+		//toriginal := t.original(asUid)
+		//outgoingMessages := make([]*ServerComMessage, len(unreadMsgs))
+		var notifyUpdateExpired *ServerComMessage
+		for i, unreadMsg := range unreadMsgs {
+			expiredAt := now.Add(time.Duration(unreadMsg.ExpirePeriod) * time.Second)
+			unreadMsg.ExpiredAt = &expiredAt
+			unreadMsgs[i] = unreadMsg
+
+			//from := ""
+			//if !asChan {
+			//	// Don't show sender for channel readers
+			//	from = types.ParseUid(unreadMsg.From).UserId()
+			//}
+
+			// update database messages
+			if err = store.Messages.UpdateMessage(t.name, unreadMsg.SeqId, *unreadMsg.ExpiredAt); err != nil {
+				logs.Warn.Printf("topic[%s]: update message err: %v", t.name, err)
+				return
+			}
+
+			for sess, pssd := range t.sessions {
+				notifyUpdateExpired = &ServerComMessage{
+					Pres: &MsgServerPres{
+						What:         "updateMsg",
+						Topic:        msg.Original,
+						SeqId:        unreadMsg.SeqId,
+						ExpirePeriod: unreadMsg.ExpirePeriod,
+						ExpiredAt:    unreadMsg.ExpiredAt,
+						From:         msg.AsUser,
+					},
+				}
+				msgCopy := notifyUpdateExpired.copy()
+				t.prepareBroadcastableMessage(msgCopy, pssd.uid, pssd.isChanSub)
+
+				sess.queueOut(msgCopy)
+			}
+
+			for uid, _ := range t.perUser {
+				user := uid.UserId()
+				// send to subs offline user
+				if dst := globals.hub.topicGet(user); dst != nil {
+					for sess, pssd := range dst.sessions {
+						notifyUpdateExpired = &ServerComMessage{
+							Pres: &MsgServerPres{
+								What:         "updateMsg",
+								Topic:        msg.Original,
+								SeqId:        unreadMsg.SeqId,
+								ExpirePeriod: unreadMsg.ExpirePeriod,
+								ExpiredAt:    unreadMsg.ExpiredAt,
+								From:         msg.AsUser,
+							},
+						}
+						msgCopy := notifyUpdateExpired.copy()
+						t.prepareBroadcastableMessage(msgCopy, pssd.uid, pssd.isChanSub)
+
+						sess.queueOut(msgCopy)
+					}
+				}
+			}
+		}
+
+		//for sess, _ := range t.sessions {
+		//	sess.queueOutBatch(outgoingMessages)
+		//}
+	}
 }
 
 // handlePresence fans out {pres} messages to recipients in topic.
@@ -1312,7 +1403,30 @@ func (t *Topic) broadcastToSessions(msg *ServerComMessage) {
 
 				} else if !t.userIsReader(pssd.uid) && !pssd.isChanSub {
 					// Skip {data} if the user has no Read permission and not a channel reader.
-					continue
+					// if data mention user, do not skip
+					if msg.Data != nil {
+						mentionUsers, err := drafty.GetMentionUsers(msg.Data.Content)
+						if err != nil {
+							logs.Err.Printf("topic[%s]: failed to send message: %v", t.name, err)
+							continue
+						}
+						userID := pssd.uid.UserId()
+						isSkip := true
+						if len(mentionUsers) > 0 {
+							for _, user := range mentionUsers {
+								if user == userID {
+									isSkip = false
+									break
+								}
+							}
+						}
+
+						if isSkip {
+							continue
+						}
+					} else {
+						continue
+					}
 				}
 			}
 		} else if pssd.isChanSub && types.IsChannel(sess.sid) {
@@ -2090,6 +2204,8 @@ func (t *Topic) replyGetDesc(sess *Session, asUid types.Uid, asChan bool, opts *
 	// Request may come from a subscriber (full == true) or a stranger.
 	// Give subscriber a fuller description than to a stranger/channel reader.
 	if full {
+		// return message expire period
+		desc.ExpirePeriod = pud.expirePeriod
 		if t.cat == types.TopicCatP2P {
 			// For p2p topics default access mode makes no sense: only participants have access to topic.
 			// Don't report it.
@@ -2342,7 +2458,7 @@ func (t *Topic) replySetDesc(sess *Session, asUid types.Uid, asChan bool,
 				// Notify all subscribers on 'me' except the user who made the change and blocked users.
 				// The user who made the change will be notified separately (see below).
 				filter := &presFilters{excludeUser: asUid.UserId(), filterIn: types.ModeJoin}
-				t.presSubsOffline("upd", nilPresParams, filter, filter, sess.sid, false)
+				t.presSubsOffline("upd", nilPresParams, filter, filter, sess.sid, false, &ServerComMessage{})
 			}
 
 			t.updated = now
@@ -2675,45 +2791,90 @@ func (t *Topic) replySetSub(sess *Session, pkt *ClientComMessage, asChan bool) e
 
 	asUid := types.ParseUserId(pkt.AsUser)
 	set := pkt.Set
+	// set subscription message expire period time
+	if set.Sub.ExpirePeriod != 0 {
+		// get topic cat
+		tCat := topicCat(t.name)
+		if tCat == types.TopicCatP2P {
+			if err := store.Subs.Update(t.name, asUid,
+				map[string]any{
+					"expireperiod": set.Sub.ExpirePeriod,
+				}); err != nil {
+				return err
+			}
 
-	var target types.Uid
-	if target = types.ParseUserId(set.Sub.User); target.IsZero() && set.Sub.User != "" {
-		// Invalid user ID
-		sess.queueOut(ErrMalformedReply(pkt, now))
-		return errors.New("invalid user id")
-	}
+			if _, found := t.perUser[asUid]; found {
+				tmpPerUser := t.perUser[asUid]
+				tmpPerUser.expirePeriod = set.Sub.ExpirePeriod
+				t.perUser[asUid] = tmpPerUser
+			}
 
-	// if set.User is not set, request is for the current user
-	if target.IsZero() {
-		target = asUid
-	}
+		} else if tCat == types.TopicCatGrp {
+			if t.owner != asUid {
+				sess.queueOut(ErrPermissionDeniedReply(pkt, now))
+				return errors.New("topic permission error: this grp topic is not own by asUid")
+			}
 
-	var err error
-	var modeChanged *MsgAccessMode
-	if target == asUid {
-		// Request new subscription or modify own subscription
-		modeChanged, err = t.thisUserSub(sess, pkt, asUid, asChan, set.Sub.Mode, nil)
-	} else {
-		// Request to approve/change someone's subscription
-		modeChanged, err = t.anotherUserSub(sess, asUid, target, asChan, pkt)
-	}
-	if err != nil {
-		return err
-	}
+			if err := store.Subs.Update(t.name, types.ZeroUid,
+				map[string]any{
+					"expireperiod": set.Sub.ExpirePeriod,
+				}); err != nil {
+				return err
+			}
 
-	var resp *ServerComMessage
-	if modeChanged != nil {
-		// Report resulting access mode.
-		params := map[string]any{"acs": modeChanged}
-		if target != asUid {
-			params["user"] = target.UserId()
+			for uid, data := range t.perUser {
+				tmpPerUser := data
+				tmpPerUser.expirePeriod = set.Sub.ExpirePeriod
+				t.perUser[uid] = tmpPerUser
+			}
+		} else {
+			sess.queueOut(ErrMalformedReply(pkt, now))
+			return errors.New("invalid topic type set expire period")
 		}
-		resp = NoErrParamsReply(pkt, now, params)
-	} else {
-		resp = InfoNotModifiedReply(pkt, now)
-	}
 
-	sess.queueOut(resp)
+		resp := NoErrParamsReply(pkt, now, nil)
+		sess.queueOut(resp)
+	} else {
+		var target types.Uid
+
+		if target = types.ParseUserId(set.Sub.User); target.IsZero() && set.Sub.User != "" {
+			// Invalid user ID
+			sess.queueOut(ErrMalformedReply(pkt, now))
+			return errors.New("invalid user id")
+		}
+
+		// if set.User is not set, request is for the current user
+		if target.IsZero() {
+			target = asUid
+		}
+
+		var err error
+		var modeChanged *MsgAccessMode
+		if target == asUid {
+			// Request new subscription or modify own subscription
+			modeChanged, err = t.thisUserSub(sess, pkt, asUid, asChan, set.Sub.Mode, nil)
+		} else {
+			// Request to approve/change someone's subscription
+			modeChanged, err = t.anotherUserSub(sess, asUid, target, asChan, pkt)
+		}
+		if err != nil {
+			return err
+		}
+
+		var resp *ServerComMessage
+		if modeChanged != nil {
+			// Report resulting access mode.
+			params := map[string]any{"acs": modeChanged}
+			if target != asUid {
+				params["user"] = target.UserId()
+			}
+			resp = NoErrParamsReply(pkt, now, params)
+		} else {
+			resp = InfoNotModifiedReply(pkt, now)
+		}
+
+		sess.queueOut(resp)
+	}
 
 	return nil
 }
@@ -2753,12 +2914,14 @@ func (t *Topic) replyGetData(sess *Session, asUid types.Uid, asChan bool, req *M
 					}
 					outgoingMessages[i] = &ServerComMessage{
 						Data: &MsgServerData{
-							Topic:     toriginal,
-							Head:      mm.Head,
-							SeqId:     mm.SeqId,
-							From:      from,
-							Timestamp: mm.CreatedAt,
-							Content:   mm.Content,
+							Topic:        toriginal,
+							Head:         mm.Head,
+							SeqId:        mm.SeqId,
+							From:         from,
+							Timestamp:    mm.CreatedAt,
+							Content:      mm.Content,
+							ExpirePeriod: mm.ExpirePeriod,
+							ExpiredAt:    mm.ExpiredAt,
 						},
 					}
 				}
@@ -3064,7 +3227,7 @@ func (t *Topic) replyDelMsg(sess *Session, asUid types.Uid, asChan bool, msg *Cl
 			if len(ranges) == 1 && ranges[0].Hi == 0 {
 				var chatMsg *types.Message
 				if chatMsg, err = store.Messages.GetMessageByTopicSeqId(t.name, ranges[0].Low); err != nil {
-					err = errors.New("del.msg: can not find msg")
+					err = errors.New("del.msg: can not find msg" + err.Error())
 					sess.queueOut(ErrUnknownReply(msg, now))
 					return err
 				}
@@ -3103,7 +3266,7 @@ func (t *Topic) replyDelMsg(sess *Session, asUid types.Uid, asChan bool, msg *Cl
 		params := &presParams{delID: t.delID, delSeq: dr, actor: asUid.UserId()}
 		filters := &presFilters{filterIn: types.ModeRead}
 		t.presSubsOnline("del", params.actor, params, filters, sess.sid)
-		t.presSubsOffline("del", params, filters, nilPresFilters, sess.sid, true)
+		t.presSubsOffline("del", params, filters, nilPresFilters, sess.sid, true, &ServerComMessage{})
 	} else {
 		pud := t.perUser[asUid]
 		pud.delID = t.delID
@@ -3441,7 +3604,7 @@ func (t *Topic) notifySubChange(uid, actor types.Uid, isChan bool,
 	// announce the request to topic admins on 'me' so they can approve the request. The notification
 	// is not sent to the target user or the actor's session.
 	if newWant.BetterThan(newGiven) || oldWant == types.ModeNone {
-		t.presSubsOffline("acs", params, filterSharers, filterSharers, skip, true)
+		t.presSubsOffline("acs", params, filterSharers, filterSharers, skip, true, &ServerComMessage{})
 	}
 
 	// Handling of muting/unmuting.
@@ -3817,4 +3980,81 @@ func topicNameForUser(name string, uid types.Uid, isChan bool) string {
 		}
 	}
 	return name
+}
+
+var delExpMsgLock sync.Mutex
+
+// deleteExpiredMessages auto delete expired messages
+// and notify topic's subscriptions
+func deleteExpiredMessages() chan<- bool {
+	stop := make(chan bool)
+	go func() {
+		ticker := time.Tick(time.Second)
+		for {
+			select {
+			case <-ticker:
+				if delExpMsgLock.TryLock() {
+					topicMsgs := make(map[string][]types.Message)
+					if msgs, err := store.Messages.GetExpiredList(); err == nil {
+						if len(msgs) > 0 {
+							logs.Info.Println("find expired message will delete:", len(msgs))
+							for _, msg := range msgs {
+								topicMsgs[msg.Topic] = append(topicMsgs[msg.Topic], msg)
+							}
+							var delID int
+							for topic, messages := range topicMsgs {
+								t := globals.hub.topicGet(topic)
+								if t != nil {
+									delID = t.delID
+								} else {
+									// select the db
+									stopic, err := store.Topics.Get(topic)
+									if err != nil {
+										logs.Warn.Println("db get topic error:", topic, err)
+										continue
+									}
+									if stopic != nil {
+										delID = stopic.DelId
+									}
+								}
+
+								for _, message := range messages {
+									var ranges []types.Range
+									ranges = append(ranges, types.Range{Low: message.SeqId, Hi: 0})
+									if err = store.Messages.DeleteList(topic, delID+1, types.ZeroUid, ranges); err != nil {
+										logs.Warn.Println("db delete expired message error:", err)
+									}
+									delID++
+
+									if t != nil {
+										dr := delrangeDeserialize(ranges)
+										t.delID = delID
+										for uid, pud := range t.perUser {
+											pud.delID = t.delID
+											t.perUser[uid] = pud
+										}
+
+										// Broadcast the change to all, online and offline, exclude the session making the change.
+										params := &presParams{delID: t.delID, delSeq: dr, actor: message.From}
+										filters := &presFilters{filterIn: types.ModeRead}
+										t.presSubsOnline("del", params.actor, params, filters, "")
+										t.presSubsOffline("del", params, filters, nilPresFilters, "", true, &ServerComMessage{})
+										logs.Info.Println("topic delete expired message success:", topic, delID)
+									}
+								}
+								logs.Info.Println("topic delete expired message success:", topic, delID)
+							}
+						}
+					} else {
+						logs.Warn.Println("get expired messages error:", err)
+					}
+					delExpMsgLock.Unlock()
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	return stop
 }
