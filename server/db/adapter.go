@@ -161,6 +161,7 @@ type Adapter interface {
 	MessageListByTopicSeqIdRange(topic string, forUser t.Uid, seqIdStart int, seqIdEnd int) ([]t.Message, error)
 	MessageUpdate(topic string, seqId int, expired time.Time) error
 	MessageExpiredList() ([]t.Message, error)
+	MessageUpdateMissExpired() error
 
 	// Devices (for push notifications)
 

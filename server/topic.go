@@ -3983,6 +3983,7 @@ func topicNameForUser(name string, uid types.Uid, isChan bool) string {
 }
 
 var delExpMsgLock sync.Mutex
+var updateMissExpMsgLock sync.Mutex
 
 // deleteExpiredMessages auto delete expired messages
 // and notify topic's subscriptions
@@ -4049,6 +4050,32 @@ func deleteExpiredMessages() chan<- bool {
 						logs.Warn.Println("get expired messages error:", err)
 					}
 					delExpMsgLock.Unlock()
+				}
+			case <-stop:
+				return
+			}
+		}
+	}()
+
+	return stop
+}
+
+// updateMissExpiredMessages update miss expired message's expired
+func updateMissExpiredMessages() chan<- bool {
+	stop := make(chan bool)
+	go func() {
+		ticker := time.Tick(time.Minute)
+		for {
+			select {
+			case <-ticker:
+				if updateMissExpMsgLock.TryLock() {
+					if err := store.Messages.UpdateMissExpired(); err != nil {
+						logs.Warn.Println("update miss expired messages error:", err)
+					} else {
+						logs.Info.Println("update miss expired messages success")
+					}
+
+					updateMissExpMsgLock.Unlock()
 				}
 			case <-stop:
 				return

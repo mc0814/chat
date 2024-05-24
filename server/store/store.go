@@ -658,6 +658,7 @@ type MessagesPersistenceInterface interface {
 	GetListBySeqIdRange(topic string, forUser types.Uid, seqIdStart int, seqIdEnd int) ([]types.Message, error)
 	UpdateMessage(topic string, seqId int, expired time.Time) error
 	GetExpiredList() ([]types.Message, error)
+	UpdateMissExpired() error
 }
 
 // messagesMapper is a concrete type implementing MessagesPersistenceInterface.
@@ -798,6 +799,10 @@ func (messagesMapper) UpdateMessage(topic string, seqId int, expired time.Time) 
 // GetExpiredList Get all expired messages
 func (messagesMapper) GetExpiredList() ([]types.Message, error) {
 	return adp.MessageExpiredList()
+}
+
+func (messagesMapper) UpdateMissExpired() error {
+	return adp.MessageUpdateMissExpired()
 }
 
 // Registered authentication handlers.

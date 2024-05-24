@@ -649,6 +649,12 @@ func main() {
 		delExpMsgStop <- true
 	}()
 
+	// start update miss expired messages task
+	updateMissExpMsgStop := updateMissExpiredMessages()
+	defer func() {
+		updateMissExpMsgStop <- true
+	}()
+
 	// Serve static content from the directory in -static_data flag if that's
 	// available, otherwise assume '<current-dir>/static'. The content is served at
 	// the path pointed by 'static_mount' in the config. If that is missing then it's

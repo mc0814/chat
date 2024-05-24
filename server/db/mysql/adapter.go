@@ -2898,6 +2898,25 @@ func (a *adapter) MessageExpiredList() ([]t.Message, error) {
 	return msgs, err
 }
 
+func (a *adapter) MessageUpdateMissExpired() error {
+	ctx, cancel := a.getContext()
+	if cancel != nil {
+		defer cancel()
+	}
+	_, err := a.db.ExecContext(ctx, "UPDATE messages "+
+		"LEFT JOIN subscriptions ON messages.topic = subscriptions.topic "+
+		"SET expiredat = subscriptions.updatedat + INTERVAL messages.expireperiod SECOND "+
+		"WHERE "+
+		"messages.`from` != subscriptions.userid "+
+		"AND messages.seqid < subscriptions.readseqid "+
+		"AND messages.deletedat IS NULL "+
+		"AND messages.expiredat IS NULL "+
+		"AND subscriptions.topic IS NOT NULL "+
+		"AND messages.expireperiod != - 1 ")
+
+	return err
+}
+
 func deviceHasher(deviceID string) string {
 	// Generate custom key as [64-bit hash of device id] to ensure predictable
 	// length of the key
