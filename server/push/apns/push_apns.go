@@ -110,9 +110,10 @@ func sendApns(rcpt *push.Receipt, config *configType) {
 
 		if err != nil {
 			logs.Warn.Println("apns push err:", err)
+			return
 		}
 
-		fmt.Printf("%v %v %v\n", res.StatusCode, res.ApnsID, res.Reason)
+		//fmt.Printf("%v %v %v\n", res.StatusCode, res.ApnsID, res.Reason)
 
 		if res.StatusCode != 200 {
 			switch res.Reason {
