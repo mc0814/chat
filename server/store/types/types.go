@@ -519,6 +519,12 @@ type User struct {
 	Devices map[string]*DeviceDef `bson:"__devices,skip,omitempty"`
 	// Same for mongodb scheme. Ignore in other db backends if its not suitable.
 	DeviceArray []*DeviceDef `json:"-" bson:"devices"`
+
+	// union_id
+	UnionId string `json:"UnionId,omitempty" bson:"union_id,omitempty"`
+
+	// feishu_app_id
+	FeishuAppId string `json:"FeishuAppId,omitempty" bson:"feishu_app_id,omitempty"`
 }
 
 // AccessMode is a definition of access mode bits.
@@ -1362,4 +1368,9 @@ func FlattenDoubleSlice(data [][]string) []string {
 		result = append(result, el...)
 	}
 	return result
+}
+
+type FeishuApp struct {
+	AppId     string `json:"appid"`
+	AppSecret string `json:"appsecret"`
 }

@@ -4,6 +4,8 @@ package push
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"github.com/tinode/chat/server/logs"
 	"time"
 
 	t "github.com/tinode/chat/server/store/types"
@@ -137,6 +139,7 @@ func Register(name string, hnd Handler) {
 		panic("Register: called twice for handler " + name)
 	}
 	handlers[name] = hnd
+	fmt.Println("register: ", name)
 }
 
 // Init initializes registered handlers.
@@ -151,6 +154,7 @@ func Init(jsconfig json.RawMessage) ([]string, error) {
 	for _, cc := range config {
 		if hnd := handlers[cc.Name]; hnd != nil {
 			if ok, err := hnd.Init(cc.Config); err != nil {
+				logs.Info.Println("Push handlers configured:", err)
 				return nil, err
 			} else if ok {
 				enabled = append(enabled, cc.Name)

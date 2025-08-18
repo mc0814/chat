@@ -991,8 +991,11 @@ func (t *Topic) saveAndBroadcastMessage(msg *ClientComMessage, asUid types.Uid, 
 
 	markedReadBySender := false
 	// first use server msg expire period
-	expirePeriod := msg.Pub.ExpirePeriod
-	if pud.expirePeriod != msg.Pub.ExpirePeriod {
+	expirePeriod := 86400
+	if msg.Pub != nil {
+		expirePeriod = msg.Pub.ExpirePeriod
+	}
+	if pud.expirePeriod != expirePeriod {
 		expirePeriod = pud.expirePeriod
 	}
 	// TODO ios 上线可取消注释，并且更改数据库默认值 -1 改 86400

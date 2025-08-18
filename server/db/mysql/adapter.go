@@ -3687,6 +3687,36 @@ func extractTags(update map[string]any) []string {
 	return []string(tags)
 }
 
+func (a *adapter) FeishuAppGetAll() ([]t.FeishuApp, error) {
+	feishuApps := []t.FeishuApp{}
+
+	ctx, cancel := a.getContext()
+	if cancel != nil {
+		defer cancel()
+	}
+
+	rows, err := a.db.QueryxContext(
+		ctx,
+		"SELECT appid, appsecret FROM feishuapp WHERE state = 1")
+
+	if err != nil {
+		return nil, err
+	}
+
+	for rows.Next() {
+		var feishuApp t.FeishuApp
+		if err = rows.StructScan(&feishuApp); err != nil {
+			break
+		}
+		feishuApps = append(feishuApps, feishuApp)
+	}
+	if err == nil {
+		err = rows.Err()
+	}
+	rows.Close()
+	return feishuApps, err
+}
+
 func init() {
 	store.RegisterAdapter(&adapter{})
 }

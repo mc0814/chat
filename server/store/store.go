@@ -1124,6 +1124,22 @@ func (pcacheMapper) Expire(keyPrefix string, olderThan time.Time) error {
 	return adp.PCacheExpire(keyPrefix, olderThan)
 }
 
+// FeishuAppInterface is an interface which defines methods for feishu app records.
+type FeishuAppInterface interface {
+	GetAll() ([]types.FeishuApp, error)
+}
+
+// feishuAppMapper is a concrete type which implements FeishuAppInterface.
+type feishuAppMapper struct{}
+
+// FeishuApps is a singleton ancor object exporting FeishuAppInterface methods.
+var FeishuApps FeishuAppInterface
+
+// GetAll returns a slice of user objects for the given user ids
+func (feishuAppMapper) GetAll() ([]types.FeishuApp, error) {
+	return adp.FeishuAppGetAll()
+}
+
 func init() {
 	Store = storeObj{}
 	Users = usersMapper{}
@@ -1133,4 +1149,5 @@ func init() {
 	Devices = deviceMapper{}
 	Files = fileMapper{}
 	PCache = pcacheMapper{}
+	FeishuApps = feishuAppMapper{}
 }

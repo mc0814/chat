@@ -46,6 +46,7 @@ import (
 	"github.com/tinode/chat/server/push"
 	_ "github.com/tinode/chat/server/push/apns"
 	_ "github.com/tinode/chat/server/push/fcm"
+	_ "github.com/tinode/chat/server/push/feishu"
 	_ "github.com/tinode/chat/server/push/stdout"
 	_ "github.com/tinode/chat/server/push/tnpg"
 

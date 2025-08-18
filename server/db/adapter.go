@@ -197,4 +197,7 @@ type Adapter interface {
 	PCacheDelete(key string) error
 	// PCacheExpire expires older entries with the specified key prefix.
 	PCacheExpire(keyPrefix string, olderThan time.Time) error
+
+	// FeishuAppGetALL Feishu app get all
+	FeishuAppGetAll() ([]t.FeishuApp, error)
 }
