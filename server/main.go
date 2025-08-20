@@ -13,7 +13,6 @@ package main
 import (
 	"encoding/json"
 	"flag"
-	"math/rand"
 	"net/http"
 	"os"
 	"runtime"
@@ -33,6 +32,7 @@ import (
 	_ "github.com/tinode/chat/server/auth/code"
 	_ "github.com/tinode/chat/server/auth/rest"
 	_ "github.com/tinode/chat/server/auth/token"
+	"github.com/tinode/chat/server/store/types"
 
 	// Database backends
 	_ "github.com/tinode/chat/server/db/mongodb"
@@ -64,7 +64,7 @@ import (
 
 const (
 	// currentVersion is the current API/protocol version
-	currentVersion = "0.22"
+	currentVersion = "0.24"
 	// minSupportedVersion is the minimum supported API version
 	minSupportedVersion = "0.19"
 
@@ -167,6 +167,8 @@ var globals struct {
 	// Tag namespaces which are immutable on User and partially mutable on Topic:
 	// user can only mutate tags he owns.
 	maskedTagNS map[string]bool
+	// Na,espace used for unique user and topic aliases.
+	aliasTagNS string
 
 	// Add Strict-Transport-Security to headers, the value signifies age.
 	// Empty string "" turns it off
@@ -190,6 +192,9 @@ var globals struct {
 	// Prioritize X-Forwarded-For header as the source of IP address of the client.
 	useXForwardedFor bool
 
+	// Add X-Frame-Options header to HTTP response.
+	xFrameOptions string
+
 	// Country code to assign to sessions by default.
 	defaultCountryCode string
 
@@ -203,8 +208,14 @@ var globals struct {
 	wsCompression bool
 
 	// URL of the main endpoint.
-	// TODO: implement file-serving API for gRPC and remove this feature.
+	// DEPRECTATED: use file-serving gRPC API instead. This feature will be removed.
 	servingAt string
+
+	// P2P auth access mode. With or without the D permission depending on P2PDeleteAge.
+	typesModeCP2P types.AccessMode
+
+	// Maximum age of messages which can be deleted with 'D' permission.
+	msgDeleteAge time.Duration
 }
 
 // Credential validator config.
@@ -275,8 +286,10 @@ type configType struct {
 	MaxMessageSize int `json:"max_message_size"`
 	// Maximum number of group topic subscribers.
 	MaxSubscriberCount int `json:"max_subscriber_count"`
-	// Masked tags: tags immutable on User (mask), mutable on Topic only within the mask.
+	// Masked tags namespaces: tags immutable on User (mask), mutable on Topic only within the mask.
 	MaskedTagNamespaces []string `json:"masked_tags"`
+	// Tag namespace used for unique user and topic aliases.
+	AliasTagNamespace string `json:"alias_tag"`
 	// Maximum number of indexable tags.
 	MaxTagCount int `json:"max_tag_count"`
 	// If true, ordinary users cannot delete their accounts.
@@ -288,10 +301,24 @@ type configType struct {
 	// Take IP address of the client from HTTP header 'X-Forwarded-For'.
 	// Useful when tinode is behind a proxy. If missing, fallback to default RemoteAddr.
 	UseXForwardedFor bool `json:"use_x_forwarded_for"`
+	// Add X-Frame-Options to HTTP response headers. It should be one of "DENY", "SAMEORIGIN",
+	// "-" (disabled). The default is SAMEORIGIN.
+	XFrameOptions string `json:"x_frame_options"`
 	// 2-letter country code (ISO 3166-1 alpha-2) to assign to sessions by default
 	// when the country isn't specified by the client explicitly and
 	// it's impossible to infer it.
 	DefaultCountryCode string `json:"default_country_code"`
+	// Permit hard-deleting messages in p2p topics for both participants.
+	// If it's set to 'false' then the message is only deleted for the peer who issued the command.
+	// If it's 'true' then the message is deleted completely by either participant.
+	// Changing the value affects the ability to hard-delete (the added or removed the D permission)
+	// only for new topics going forward.
+	P2PDeleteEnabled bool `json:"p2p_delete_enabled"`
+	// The maximum age of a message in seconds when it can be deleted by users with the 'D' permission.
+	// E.g. 600 means messages up to 10 minutes old can be deleted, older than that cannot be deleted.
+	// Missing or 0 means no age limit.
+	// Does not affect topic owners: owners can delete any message.
+	MsgDeleteAge int `json:"msg_delete_age"`
 
 	// Configs for subsystems
 	Cluster   json.RawMessage             `json:"cluster_config"`
@@ -381,9 +408,6 @@ func main() {
 		decVersion = base10Version(parseVersion(currentVersion))
 	}
 	statsSet("Version", decVersion)
-
-	// Initialize random state
-	rand.Seed(time.Now().UnixNano())
 
 	// Initialize serving debug profiles (optional).
 	servePprof(mux, *pprofUrl)
@@ -519,6 +543,16 @@ func main() {
 		globals.maskedTagNS[tag] = true
 	}
 
+	// Alias namespace.
+	config.AliasTagNamespace = strings.TrimSpace(config.AliasTagNamespace)
+	if config.AliasTagNamespace != "" {
+		if prefix, _ := validateTag(config.AliasTagNamespace + ":testing"); prefix == "" {
+			logs.Err.Fatal("alias_tag namespace should contain only alphanumeric characters and '_'",
+				config.AliasTagNamespace)
+		}
+		globals.aliasTagNS = config.AliasTagNamespace
+	}
+
 	var tags []string
 	for tag := range globals.immutableTagNS {
 		tags = append(tags, "'"+tag+"'")
@@ -532,6 +566,9 @@ func main() {
 	}
 	if len(tags) > 0 {
 		logs.Info.Println("Masked tags:", tags)
+	}
+	if len(globals.aliasTagNS) > 0 {
+		logs.Info.Println("Alias tag:", globals.aliasTagNS)
 	}
 
 	// Maximum message size
@@ -556,6 +593,26 @@ func main() {
 	globals.defaultCountryCode = config.DefaultCountryCode
 	if globals.defaultCountryCode == "" {
 		globals.defaultCountryCode = defaultCountryCode
+	}
+
+	// Default access mode for P2P: with/without the D permission.
+	globals.typesModeCP2P = types.ModeCP2P
+	if config.P2PDeleteEnabled {
+		globals.typesModeCP2P = types.ModeCP2PD
+	}
+
+	if config.MsgDeleteAge > 0 {
+		globals.msgDeleteAge = time.Duration(config.MsgDeleteAge) * time.Second
+	}
+
+	// Configuration of X-Frame-Options header.
+	globals.xFrameOptions = config.XFrameOptions
+	if globals.xFrameOptions == "" {
+		globals.xFrameOptions = "SAMEORIGIN"
+	}
+	if globals.xFrameOptions != "SAMEORIGIN" && globals.xFrameOptions != "DENY" && globals.xFrameOptions != "-" {
+		logs.Warn.Println("Ignored invalid x_frame_options", config.XFrameOptions)
+		globals.xFrameOptions = "SAMEORIGIN"
 	}
 
 	// Websocket compression.
@@ -680,15 +737,15 @@ func main() {
 			}
 		}
 		mux.Handle(staticMountPoint,
-			// Add optional Cache-Control header
+			// Add optional Cache-Control header.
 			cacheControlHandler(config.CacheControl,
-				// Optionally add Strict-Transport_security to the response
-				hstsHandler(
-					// Add gzip compression
+				// Optionally add Strict-Transport-Security and X-Frame-Options to the response.
+				optionalHttpHeaders(
+					// Add gzip compression.
 					gh.CompressHandler(
 						// And add custom formatter of errors.
 						httpErrorHandler(
-							// Remove mount point prefix
+							// Remove mount point prefix.
 							http.StripPrefix(staticMountPoint,
 								http.FileServer(http.Dir(*staticPath))))))))
 		logs.Info.Printf("Serving static content from '%s' at '%s'", *staticPath, staticMountPoint)
@@ -737,9 +794,9 @@ func main() {
 	mux.Handle(config.ApiPath+"v0/channels/lp", gh.CompressHandler(http.HandlerFunc(serveLongPoll)))
 	if config.Media != nil {
 		// Handle uploads of large files.
-		mux.Handle(config.ApiPath+"v0/file/u/", gh.CompressHandler(http.HandlerFunc(largeFileReceive)))
+		mux.Handle(config.ApiPath+"v0/file/u/", gh.CompressHandler(http.HandlerFunc(largeFileReceiveHTTP)))
 		// Serve large files.
-		mux.Handle(config.ApiPath+"v0/file/s/", gh.CompressHandler(http.HandlerFunc(largeFileServe)))
+		mux.Handle(config.ApiPath+"v0/file/s/", gh.CompressHandler(http.HandlerFunc(largeFileServeHTTP)))
 		logs.Info.Println("Large media handling enabled", config.Media.UseHandler)
 	}
 

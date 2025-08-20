@@ -1,66 +1,68 @@
-<!-- TOC depthFrom:1 depthTo:6 withLinks:1 updateOnSave:1 orderedList:0 -->
+<!-- TOC depthfrom:1 depthto:6 withlinks:true updateonsave:true orderedlist:false -->
 
 - [Server API](#server-api)
-	- [How it Works?](#how-it-works)
-	- [General Considerations](#general-considerations)
-	- [Connecting to the Server](#connecting-to-the-server)
-		- [gRPC](#grpc)
-		- [WebSocket](#websocket)
-		- [Long Polling](#long-polling)
-		- [Out of Band Large Files](#out-of-band-large-files)
-		- [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy)
-	- [Users](#users)
-		- [Authentication](#authentication)
-			- [Creating an Account](#creating-an-account)
-			- [Logging in](#logging-in)
-			- [Changing Authentication Parameters](#changing-authentication-parameters)
-			- [Resetting a Password, i.e. "Forgot Password"](#resetting-a-password-ie-forgot-password)
-		- [Suspending a User](#suspending-a-user)
-		- [Credential Validation](#credential-validation)
-		- [Access Control](#access-control)
-	- [Topics](#topics)
-		- [`me` Topic](#me-topic)
-		- [`fnd` and Tags: Finding Users and Topics](#fnd-and-tags-finding-users-and-topics)
-			- [Query Language](#query-language)
-			- [Incremental Updates to Queries](#incremental-updates-to-queries)
-			- [Query Rewrite](#query-rewrite)
-			- [Possible Use Cases](#possible-use-cases)
-		- [Peer to Peer Topics](#peer-to-peer-topics)
-		- [Group Topics](#group-topics)
-		- [`sys` Topic](#sys-topic)
-	- [Using Server-Issued Message IDs](#using-server-issued-message-ids)
-	- [User Agent and Presence Notifications](#user-agent-and-presence-notifications)
-	- [Trusted, Public, and Private Fields](#trusted-public-and-private-fields)
-		- [Trusted](#trusted)
-		- [Public](#public)
-		- [Private](#private)
-	- [Format of Content](#format-of-content)
-	- [Out-of-Band Handling of Large Files](#out-of-band-handling-of-large-files)
-		- [Uploading](#uploading)
-		- [Downloading](#downloading)
-	- [Push Notifications](#push-notifications)
-		- [Tinode Push Gateway](#tinode-push-gateway)
-		- [Google FCM](#google-fcm)
-		- [Stdout](#stdout)
-	- [Video Calls](#video-calls)
-	- [Messages](#messages)
-		- [Client to Server Messages](#client-to-server-messages)
-			- [`{hi}`](#hi)
-			- [`{acc}`](#acc)
-			- [`{login}`](#login)
-			- [`{sub}`](#sub)
-			- [`{leave}`](#leave)
-			- [`{pub}`](#pub)
-			- [`{get}`](#get)
-			- [`{set}`](#set)
-			- [`{del}`](#del)
-			- [`{note}`](#note)
-		- [Server to Client Messages](#server-to-client-messages)
-			- [`{data}`](#data)
-			- [`{ctrl}`](#ctrl)
-			- [`{meta}`](#meta)
-			- [`{pres}`](#pres)
-			- [`{info}`](#info)
+  - [How it Works?](#how-it-works)
+  - [General Considerations](#general-considerations)
+  - [Connecting to the Server](#connecting-to-the-server)
+    - [gRPC](#grpc)
+    - [WebSocket](#websocket)
+    - [Long Polling](#long-polling)
+    - [Out of Band Large Files](#out-of-band-large-files)
+    - [Running Behind a Reverse Proxy](#running-behind-a-reverse-proxy)
+  - [Users](#users)
+    - [Authentication](#authentication)
+      - [Creating an Account](#creating-an-account)
+      - [Logging in](#logging-in)
+      - [Changing Authentication Parameters](#changing-authentication-parameters)
+      - [Resetting a Password, i.e. "Forgot Password"](#resetting-a-password-ie-forgot-password)
+    - [Suspending a User](#suspending-a-user)
+    - [Credential Validation](#credential-validation)
+    - [Access Control](#access-control)
+  - [Topics](#topics)
+    - [me Topic](#me-topic)
+    - [fnd and Tags: Finding Users and Topics](#fnd-and-tags-finding-users-and-topics)
+      - [Query Language](#query-language)
+      - [Incremental Updates to Queries](#incremental-updates-to-queries)
+      - [Query Rewrite](#query-rewrite)
+      - [Possible Use Cases](#possible-use-cases)
+    - [Peer to Peer Topics](#peer-to-peer-topics)
+    - [Group Topics](#group-topics)
+    - [sys Topic](#sys-topic)
+  - [Using Server-Issued Message IDs](#using-server-issued-message-ids)
+  - [User Agent and Presence Notifications](#user-agent-and-presence-notifications)
+  - [Trusted, Public, Private, Auxiliary Fields](#trusted-public-private-auxiliary-fields)
+    - [Trusted](#trusted)
+    - [Public](#public)
+    - [Private](#private)
+    - [Auxiliary](#auxiliary)
+  - [Format of Content](#format-of-content)
+  - [Out-of-Band Handling of Large Files](#out-of-band-handling-of-large-files)
+    - [Uploading](#uploading)
+    - [Downloading](#downloading)
+  - [Push Notifications](#push-notifications)
+    - [Tinode Push Gateway](#tinode-push-gateway)
+    - [Google FCM](#google-fcm)
+    - [Stdout](#stdout)
+  - [Video Calls](#video-calls)
+  - [Link Previews](#link-previews)
+  - [Messages](#messages)
+    - [Client to Server Messages](#client-to-server-messages)
+      - [{hi}](#hi)
+      - [{acc}](#acc)
+      - [{login}](#login)
+      - [{sub}](#sub)
+      - [{leave}](#leave)
+      - [{pub}](#pub)
+      - [{get}](#get)
+      - [{set}](#set)
+      - [{del}](#del)
+      - [{note}](#note)
+    - [Server to Client Messages](#server-to-client-messages)
+      - [{data}](#data)
+      - [{ctrl}](#ctrl)
+      - [{meta}](#meta)
+      - [{pres}](#pres)
+      - [{info}](#info)
 
 <!-- /TOC -->
 
@@ -309,13 +311,13 @@ Topic properties independent of the user making the query:
  * `anon`: default access for anonymous users
 * `seq`: integer server-issued sequential ID of the latest `{data}` message sent through the topic
 * `trusted`: an application-defined object issued by the system administrators. Anyone can read it but only administrators can change it.
-* `public`: an application-defined object that describes the topic. Anyone who can subscribe to topic can receive topic's `public` data.
+* `public`: an application-defined object that describes the topic. Anyone who can subscribe to topic can receive topic's `public` data, only topic `owner` can change it.
 
 User-dependent topic properties:
 * `acs`: object describing given user's current access permissions; see [Access control](#access-control) for details
  * `want`: access permission requested by this user
  * `given`: access permissions given to this user
-* `private`: an application-defined object that is unique to the current user.
+* `private`: an application-defined object that is unique to the current user (topic subscriber).
 
 Topic usually have subscribers. One of the subscribers may be designated as topic owner (`O` access permission) with full access permissions. The list of subscribers can be queries with a `{get what="sub"}` message. The list of subscribers is returned in a `sub` section of a `{meta}` message.
 
@@ -444,13 +446,22 @@ A user is reported as being online when one or more of user's sessions are attac
 
 An empty `ua=""` _user agent_ is not reported. I.e. if user attaches to `me` with non-empty _user agent_ then does so with an empty one, the change is not reported. An empty _user agent_ may be disallowed in the future.
 
-## Trusted, Public, and Private Fields
+## Trusted, Public, Private, Auxiliary Fields
 
-Topics and subscriptions have `trusted`, `public`, and `private` fields. Generally, the fields are application-defined. The server does not enforce any particular structure of these fields except for `fnd` topic. At the same time, client software should use the same format for interoperability reasons. The following sections describe the format of these fields as they are implemented by all official clients.
+Topics have `trusted`, `public`, `aux` fields, subscriptions have `private` fields. The primary difference between these fields is in access control:
+
+ * `trusted`: writable by `ROOT` users, readable by anyone.
+ * `public`: writable by the `owner` or the user, readable by anyone.
+ * `aux`: writable by topic administrators, readable by subscribers.
+ * `private`: readable and writable only by the user who created the subscription.
+
+Generally, the fields are application-defined. The server does not enforce any particular structure of these fields except for `fnd` topic. At the same time, client software should use the same format for interoperability reasons. The following sections describe the format of these fields as they are implemented by all official clients.
+
+Although it's not yet enforced, if a third-party application defines custom keys, the key names should start with an `x-` followed by the application's fully qualified domain name, e.g. `x-example.com-value: "abc"`. The fields should contain primitive types only, i.e. `string`, `boolean`, `number`, or `null`.
 
 ### Trusted
 
-The format of the optional `trusted` field in group and peer to peer topics is a set of key-value pairs; `fnd` and `sys` topics do not have the `trusted`. The following optional keys are currently defined:
+The format of the optional `trusted` field in group and peer to peer topics is a set of key-value pairs; `fnd` and `sys` topics do not have the `trusted`. The field is writable by `ROOT` users, readable by anyone who has access to the topic or user. The following optional keys are currently defined:
 ```js
 trusted: {
   verified: true, // boolean, an indicator of a verified/trustworthy user or topic.
@@ -462,26 +473,33 @@ trusted: {
 
 ### Public
 
-The format of the `public` field in group, peer to peer, systems topics is expected to be [theCard](./thecard.md).
+The format of the `public` field in group, peer to peer, systems topics is expected to be [theCard](./thecard.md). The field is writable by by the user for users, the topic owner for topics. The field is readable by anyone who has access to topic or user.
 
 The `fnd` topic expects `public` to be a string representing a [search query](#query-language)).
 
 ### Private
 
-The format of the `private` field in group and peer to peer topics is a set of key-value pairs. The following keys are currently defined:
+The format of the `private` field in group and peer to peer topics is a set of key-value pairs. The field is writable and readable by the user only. The following keys are currently defined:
 ```js
 private: {
   comment: "some comment", // string, optional user comment about a topic or a peer user
   arch: true, // boolean, indicator that the topic is archived by the user, i.e.
               // should not be shown in the UI with other non-archived topics.
-  starred: false,  // boolean, an indicator that the topic is starred or pinned by the user.
   accepted: "JRWS" // string, 'given' mode accepted by the user.
 }
 ```
 
-Although it's not yet enforced, custom fields should start with an `x-` followed by the application name, e.g. `x-myapp-value: "abc"`. The fields should contain primitive types only, i.e. `string`, `boolean`, `number`, or `null`.
-
 The `fnd` topic expects `private` to be a string representing a [search query](#query-language)).
+
+### Auxiliary
+
+The format of the `aux` field is a set of key-value pairs. The `aux` is writable by topic admins and readable by all topic subscribers. The following keys are currently defined:
+
+```js
+aux: {
+  pins: [1001, 23456] // array of integer message IDs to pin to the top of the message list.
+}
+```
 
 ## Format of Content
 
@@ -600,6 +618,21 @@ The `stdout` adapter is mostly useful for debugging and logging. It writes push 
 ## Video Calls
 
 [See separate document](call-establishment.md).
+
+## Link Previews
+
+Tinode provides an optional service which helps client applications generate link (URL) previews for inclusion into messages. The enpoint of this service (if enabled) is located at `/v0/urlpreview`. The service takes a single parameter `url`:
+
+```
+/v0/urlpreview?url=https%3A%2F%2Ftinode.co
+```
+The first several kilobytes of the document at the given URL is fetched by issuing an HTTP(S) GET request. If the returned document has content-type `text/html`, the HTML is parsed for page title, description, and image URL. The result is formatted as JSON and returned as
+
+```json
+{"title": "Page title", "description": "This is a page description", "image_url": "https://tinode.co/img/logo64x64.png"}
+```
+
+The link preview service requires authentication. It's exactly the same as authentication for [Out of Band Large Files](#out-of-band-handling-of-large-files).
 
 ## Messages
 
@@ -796,7 +829,9 @@ sub: {
       val: "alice@example.com", // string, credential to verify such as email or phone
       resp: "178307", // string, verification response, optional
       params: { ... } // parameters, specific to the verification method, optional
-    }
+    },
+
+    aux: { ... } // update auxiliary data.
   },
 
   get: {
@@ -837,7 +872,7 @@ sub: {
 }
 ```
 
-See [Public and Private Fields](#public-and-private-fields) for `private` and `public` format considerations.
+See [Trusted, Public, and Private Fields](#trusted-public-and-private-fields) for `trusted`, `private`, and `public` format considerations.
 
 #### `{leave}`
 
@@ -865,8 +900,7 @@ pub: {
   id: "1a2b3", // string, client-provided message id, optional
   topic: "grp1XUtEhjv6HND", // string, topic to publish to, required
   noecho: false, // boolean, suppress echo (see below), optional
-  head: { key: "value", ... }, // set of string key-value pairs,
-               // passed to {data} unchanged, optional
+  head: { key: "value", ... }, // set of string key-value pairs, optional
   content: { ... }  // object, application-defined content to publish
                // to topic subscribers, required
 }
@@ -960,7 +994,7 @@ If `ims` is specified and data has not been updated, the message will skip `trus
 
 Limited information is available without [attaching](#sub) to topic first.
 
-See [Public and Private Fields](#public-and-private-fields) for `private` and `public` format considerations.
+See [Trusted, Public, and Private Fields](#trusted-public-and-private-fields) for `trusted`, `private`, and `public` format considerations.
 
 * `{get what="sub"}`
 
@@ -987,6 +1021,11 @@ Query message deletion history. Server responds with a `{meta}` message containi
 * `{get what="cred"}`
 
 Query [credentials](#credentail-validation). Server responds with a `{meta}` message containing an array of credentials. Supported for `me` topic only.
+
+* `{get what="aux"}`
+
+Query auxiliary topic data. Server responds with a `{meta}` message containing an object with auxiliary key-value pairs.
+
 
 #### `{set}`
 
@@ -1026,7 +1065,9 @@ set: {
     val: "alice@example.com", // string, credential to verify such as email or phone
     resp: "178307", // string, verification response, optional
     params: { ... } // parameters, specific to the verification method, optional
-  }
+  },
+
+  aux: { ... } // application-defined key-value pairs
 }
 ```
 
@@ -1089,6 +1130,8 @@ note: {
   seq: 123,   // integer, ID of the message being acknowledged, required for
               // 'recv' & 'read'.
   unread: 10, // integer, client-reported total count of unread messages, optional.
+  event: "ringing", // string, subaction; surrently used only by video/audio calls,
+                    // when what="call".
   payload: {  // object, required payload for 'call' and 'data'.
     ...
   }
@@ -1097,7 +1140,6 @@ note: {
 
 The following actions types are currently defined:
  * call: a video call status update.
- * cala: an audio call status update.
  * data: a generic packet of structured data, usually a form response.
  * kp: key press, i.e. a typing notification. The client should use it to indicate that the user is composing a new message.
  * kpa: audio message is in the process of recording.
@@ -1195,12 +1237,12 @@ meta: {
     recv: 115, // integer, like 'read', but received, optional
     clear: 12, // integer, in case some messages were deleted, the greatest ID
                // of a deleted message, optional
-    trusted: { ... }, // application-defined payload assigned by the system
-                      // administration
-    public: { ... }, // application-defined data that's available to all topic
-                     // subscribers
-    private: { ...} // application-defined data that's available to the current
-                    // user only
+    trusted: { ... }, // application-defined payload writable by the system
+                      // administration, readable by all
+    public: { ... }, // application-defined data writable by topic owner,
+                     // readable by all
+    private: { ... } // application-defined data that's available to the current
+                     // user only
   }, // object, topic description, optional
   sub:  [ // array of objects, topic subscribers or user's subscriptions, optional
     {
@@ -1253,7 +1295,7 @@ meta: {
     ...
   ],
   tags: [ // array of tags that the topic or user (in case of "me" topic) is indexed by
-    "email:alice@example.com", "tel:+1234567890"
+    "email:alice@example.com", "tel:+1234567890", "flowers"
   ],
   cred: [ // array of user's credentials
     {
@@ -1266,7 +1308,9 @@ meta: {
   del: {
     clear: 3, // ID of the latest applicable 'delete' transaction
     delseq: [{low: 15}, {low: 22, hi: 28}, ...], // ranges of IDs of deleted messages
-  }
+  },
+  aux: { ... } // application-defined key-value pairs writable by topic managers,
+               // readable by topic subscribers.
 }
 ```
 
@@ -1300,6 +1344,7 @@ The following action types are currently defined:
  * ua: user agent changed, for example user was logged in with one client, then logged in with another
  * upd: topic description has changed
  * tags: topic tags have changed
+ * aux: topic aux data has changed
  * acs: access permissions have changed
  * gone: topic is no longer available, for example, it was deleted or you were unsubscribed from it
  * term: subscription to topic has been terminated, you may try to resubscribe
@@ -1321,6 +1366,8 @@ Forwarded client-generated notification `{note}`. Server guarantees that the mes
 ```js
 info: {
   topic: "grp1XUtEhjv6HND", // string, topic affected, always present
+  src: "usrRkDVe0PYDOo",  // string, topic where the even has occurred;
+                          // present only when "topic": "me"
   from: "usr2il9suCbuko", // string, id of the user who published the
                           // message, always present
   what: "read", // string, one of "kp", "recv", "read", "data", see client-side {note},
@@ -1328,5 +1375,7 @@ info: {
   seq: 123, // integer, ID of the message that client has acknowledged,
             // guaranteed 0 < read <= recv <= {ctrl.params.seq}; present for recv &
             // read
+  event: "ringing", // string, used by video/audio calls
+  payload: { ... }  // object, arbitrary payload, used by video calls
 }
 ```

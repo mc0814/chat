@@ -12,7 +12,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"time"
 
@@ -100,7 +100,7 @@ func (sess *Session) readOnce(wrt http.ResponseWriter, req *http.Request) (int, 
 	}
 
 	req.Body = http.MaxBytesReader(wrt, req.Body, globals.maxMessageSize)
-	raw, err := ioutil.ReadAll(req.Body)
+	raw, err := io.ReadAll(req.Body)
 	if err == nil {
 		// Locking-unlocking is needed because the client may issue multiple requests in parallel.
 		// Should not affect performance
@@ -202,19 +202,4 @@ func serveLongPoll(wrt http.ResponseWriter, req *http.Request) {
 	}
 
 	sess.writeOnce(wrt, req)
-}
-
-// Obtain IP address of the client.
-func getRemoteAddr(req *http.Request) string {
-	var addr string
-	if globals.useXForwardedFor {
-		addr = req.Header.Get("X-Forwarded-For")
-		if !isRoutableIP(addr) {
-			addr = ""
-		}
-	}
-	if addr != "" {
-		return addr
-	}
-	return req.RemoteAddr
 }

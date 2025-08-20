@@ -327,7 +327,7 @@ func (h *Hub) run() {
 				return true
 			})
 
-			for i := 0; i < topicCount; i++ {
+			for range topicCount {
 				<-topicsdone
 			}
 
@@ -563,7 +563,7 @@ func (h *Hub) topicUnreg(sess *Session, topic string, msg *ClientComMessage, rea
 // Terminate all topics associated with the given user:
 // * all p2p topics with the given user
 // * group topics where the given user is the owner.
-// * user's 'me' and 'fnd' topics.
+// * user's 'me', 'fnd', 'slf' topics.
 func (h *Hub) stopTopicsForUser(uid types.Uid, reason int, alldone chan<- bool) {
 	var done chan bool
 	if alldone != nil {
@@ -593,7 +593,7 @@ func (h *Hub) stopTopicsForUser(uid types.Uid, reason int, alldone chan<- bool) 
 	statsInc("LiveTopics", -count)
 
 	if alldone != nil {
-		for i := 0; i < count; i++ {
+		for range count {
 			<-done
 		}
 		alldone <- true
@@ -633,9 +633,10 @@ func replyOfflineTopicGetDesc(sess *Session, msg *ClientComMessage) {
 		}
 		// Report appropriate access level. Could be overridden below if subscription exists.
 		desc.Acs = &MsgAccessMode{}
-		if sess.authLvl == auth.LevelAuth || sess.authLvl == auth.LevelRoot {
+		switch sess.authLvl {
+		case auth.LevelAuth, auth.LevelRoot:
 			desc.Acs.Mode = stopic.Access.Auth.String()
-		} else if sess.authLvl == auth.LevelAnon {
+		case auth.LevelAnon:
 			desc.Acs.Mode = stopic.Access.Anon.String()
 		}
 	} else {
@@ -680,9 +681,10 @@ func replyOfflineTopicGetDesc(sess *Session, msg *ClientComMessage) {
 
 		// Report appropriate access level. Could be overridden below if subscription exists.
 		desc.Acs = &MsgAccessMode{}
-		if sess.authLvl == auth.LevelAuth || sess.authLvl == auth.LevelRoot {
+		switch sess.authLvl {
+		case auth.LevelAuth, auth.LevelRoot:
 			desc.Acs.Mode = suser.Access.Auth.String()
-		} else if sess.authLvl == auth.LevelAnon {
+		case auth.LevelAnon:
 			desc.Acs.Mode = suser.Access.Anon.String()
 		}
 	}
@@ -829,9 +831,9 @@ func replyOfflineTopicSetSub(sess *Session, msg *ClientComMessage) {
 		}
 
 		if types.GetTopicCat(msg.RcptTo) == types.TopicCatP2P {
-			// For P2P topics ignore requests exceeding types.ModeCP2P and do not allow
+			// For P2P topics ignore requests exceeding typesModeCP2P and do not allow
 			// removal of 'A' permission.
-			modeWant = modeWant&types.ModeCP2P | types.ModeApprove
+			modeWant = modeWant&globals.typesModeCP2P | types.ModeApprove
 		}
 
 		if modeWant != sub.ModeWant {

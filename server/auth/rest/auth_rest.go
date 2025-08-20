@@ -5,7 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"io/ioutil"
+	"io"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -49,11 +49,11 @@ type newAccount struct {
 	Auth string `json:"auth,omitempty"`
 	Anon string `json:"anon,omitempty"`
 	// User's Public data
-	Public interface{} `json:"public,omitempty"`
+	Public any `json:"public,omitempty"`
 	// User's Trusted data
-	Trusted interface{} `json:"trusted,omitempty"`
+	Trusted any `json:"trusted,omitempty"`
 	// Per-subscription private data
-	Private interface{} `json:"private,omitempty"`
+	Private any `json:"private,omitempty"`
 }
 
 // Response from the server.
@@ -150,7 +150,7 @@ func (a *authenticator) callEndpoint(endpoint string, rec *auth.Rec, secret []by
 	}
 
 	// Read response.
-	body, err := ioutil.ReadAll(post.Body)
+	body, err := io.ReadAll(post.Body)
 	if err != nil {
 		return nil, err
 	}
@@ -245,8 +245,8 @@ func (a *authenticator) AsTag(token string) string {
 	return ""
 }
 
-// IsUnique verifies if the provided secret can be considered unique by the auth scheme
-// E.g. if login is unique.
+// IsUnique verifies if the provided secret can be considered unique by the auth
+// scheme as well as policy compliance. E.g. if login is unique and not too short/long.
 func (a *authenticator) IsUnique(secret []byte, remoteAddr string) (bool, error) {
 	resp, err := a.callEndpoint("checkunique", nil, secret, remoteAddr)
 	if err != nil {
@@ -302,7 +302,7 @@ func (a *authenticator) RestrictedTags() ([]string, error) {
 
 // GetResetParams returns authenticator parameters passed to password reset handler
 // (none for rest).
-func (authenticator) GetResetParams(uid types.Uid) (map[string]interface{}, error) {
+func (authenticator) GetResetParams(uid types.Uid) (map[string]any, error) {
 	// TODO: route request to the server.
 	return nil, nil
 }

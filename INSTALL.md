@@ -6,7 +6,7 @@ The config file [`tinode.conf`](./server/tinode.conf) contains extensive instruc
 
 1. Visit the [Releases page](https://github.com/tinode/chat/releases/), choose the latest or otherwise the most suitable release. From the list of binaries download the one for your database and platform. Once the binary is downloaded, unpack it to a directory of your choosing, `cd` to that directory.
 
-2. Make sure your database is running. Make sure it's configured to accept connections from `localhost`. In case of MySQL, Tinode will try to connect as `root` without the password. In case of PostgreSQL, Tinode will try connect as `postgres` with the password `postgres`. See notes below (_Building from Source_, section 4) on how to configure Tinode to use a different user or a password. MySQL 5.7 or above is required. MySQL 5.6 or below **will not work**. PostgreSQL 13 or above is required. PostgreSQL 12 or below **will not work**.
+2. Make sure your database is running. Make sure it's configured to accept connections from `localhost`. In case of MySQL, Tinode will try to connect as `root` without the password. In case of PostgreSQL, Tinode will try connect as `postgres` with the password `postgres`. See notes below (_Building from Source_, section 4) on how to configure Tinode to use a different user or a password. MySQL 5.7 or above is required (use InnoDB, not MyISAM storage engine). MySQL 5.6 or below **will not work**, use of MyISAM **will cause problems**. PostgreSQL 13 or above is required. PostgreSQL 12 or below **will not work**.
 
 3. Run the database initializer `init-db` (or `init-db.exe` on Windows):
 	```
@@ -33,10 +33,10 @@ See [instructions](./docker/README.md)
 2. OPTIONAL only if you intend to modify the code: Install [protobuf](https://developers.google.com/protocol-buffers/) and [gRPC](https://grpc.io/docs/languages/go/quickstart/) including [code generator](https://developers.google.com/protocol-buffers/docs/reference/go-generated) for Go.
 
 3. Make sure one of the following databases is installed and running:
- * MySQL 5.7 or above. MySQL 5.6 or below **will not work**.
+ * MySQL 5.7 or above configured with `InnoDB` engine. MySQL 5.6 or below **will not work**.
  * PostgreSQL 13 or above. PostgreSQL 12 or below **will not work**.
- * MongoDB 4.2 or above.
- * RethinkDB.
+ * MongoDB 4.4 or above. MongoDB 4.2 and below **will not work**.
+ * RethinkDB (deprecated, support will be dropped in 2027).
 
 4. Fetch, build Tinode server and tinode-db database initializer:
   - **MySQL**:
@@ -127,11 +127,11 @@ MongoDB should run as single node replicaset. See https://docs.mongodb.com/manua
 
 2. Run DB initializer
 	```
-	$GOPATH/bin/init-db -config=./tinode-db/tinode.conf
+	$GOPATH/bin/tinode-db -config=./tinode-db/tinode.conf
 	```
 	add `-data=./tinode-db/data.json` flag if you want sample data to be loaded:
 	```
-	$GOPATH/bin/init-db -config=./tinode-db/tinode.conf -data=./tinode-db/data.json
+	$GOPATH/bin/tinode-db -config=./tinode-db/tinode.conf -data=./tinode-db/data.json
 	```
 
 	DB initializer needs to be run only once per installation. See [instructions](tinode-db/README.md) for more options.
@@ -145,7 +145,7 @@ MongoDB should run as single node replicaset. See https://docs.mongodb.com/manua
 
 5. Run the server
 	```
-	$GOPATH/bin/tinode -config=./server/tinode.conf -static_data=$HOME/tinode/webapp/
+	$GOPATH/bin/server -config=./server/tinode.conf -static_data=$HOME/tinode/webapp/
 	```
 
 6. Test your installation by pointing your browser to [http://localhost:6060/](http://localhost:6060/). The static files from the `-static_data` path are served at web root `/`. You can change this by editing the line `static_mount` in the config file.

@@ -11,7 +11,6 @@ package main
 import (
 	"context"
 	"crypto/tls"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net"
@@ -26,7 +25,6 @@ import (
 	"time"
 
 	"github.com/tinode/chat/server/logs"
-	"github.com/tinode/chat/server/store"
 	"github.com/tinode/chat/server/store/types"
 )
 
@@ -169,17 +167,6 @@ func signalHandler() <-chan bool {
 	return stop
 }
 
-// Wrapper for http.Handler which optionally adds a Strict-Transport-Security to the response.
-func hstsHandler(handler http.Handler) http.Handler {
-	if globals.tlsStrictMaxAge != "" {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Strict-Transport-Security", "max-age="+globals.tlsStrictMaxAge)
-			handler.ServeHTTP(w, r)
-		})
-	}
-	return handler
-}
-
 // The following code is used to intercept HTTP errors so they can be wrapped into json.
 
 // Wrapper around http.ResponseWriter which detects status set to 400+ and replaces
@@ -270,6 +257,34 @@ func tlsRedirect(toPort string) http.HandlerFunc {
 	}
 }
 
+// Wrapper for adding optional HTTP headers:
+//   - Strict-Transport-Security
+//   - X-Frame-Options
+//   - Referrer-Policy
+func optionalHttpHeaders(handler http.Handler) http.Handler {
+	h1 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Referrer-Policy", "origin")
+		handler.ServeHTTP(w, r)
+	})
+
+	h2 := h1
+	if globals.tlsStrictMaxAge != "" {
+		h2 = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Strict-Transport-Security", "max-age="+globals.tlsStrictMaxAge)
+			h1.ServeHTTP(w, r)
+		})
+	}
+
+	h3 := h2
+	if globals.xFrameOptions != "-" {
+		h3 = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("X-Frame-Options", globals.xFrameOptions)
+			h2.ServeHTTP(w, r)
+		})
+	}
+	return h3
+}
+
 // Wrapper for http.Handler which optionally adds a Cache-Control header to the response
 func cacheControlHandler(maxAge int, handler http.Handler) http.Handler {
 	if maxAge > 0 {
@@ -349,37 +364,19 @@ func getHttpAuth(req *http.Request) (method, secret string) {
 	return
 }
 
-// Authenticate non-websocket HTTP request
-func authHttpRequest(req *http.Request) (types.Uid, []byte, error) {
-	var uid types.Uid
-	if authMethod, secret := getHttpAuth(req); authMethod != "" {
-		decodedSecret := make([]byte, base64.StdEncoding.DecodedLen(len(secret)))
-		n, err := base64.StdEncoding.Decode(decodedSecret, []byte(secret))
-		if err != nil {
-			logs.Info.Println("media: invalid auth secret", authMethod, "'"+secret+"'")
-			return uid, nil, types.ErrMalformed
-		}
-
-		if authhdl := store.Store.GetLogicalAuthHandler(authMethod); authhdl != nil {
-			rec, challenge, err := authhdl.Authenticate(decodedSecret[:n], getRemoteAddr(req))
-			if err != nil {
-				return uid, nil, err
-			}
-			if challenge != nil {
-				return uid, challenge, nil
-			}
-			uid = rec.Uid
-		} else {
-			logs.Info.Println("media: unknown auth method", authMethod)
-		}
-	} else {
-		// Find the session, make sure it's appropriately authenticated.
-		sess := globals.sessionStore.Get(req.FormValue("sid"))
-		if sess != nil {
-			uid = sess.uid
+// Obtain IP address of the client.
+func getRemoteAddr(req *http.Request) string {
+	var addr string
+	if globals.useXForwardedFor {
+		addr = req.Header.Get("X-Forwarded-For")
+		if !isRoutableIP(addr) {
+			addr = ""
 		}
 	}
-	return uid, nil, nil
+	if addr != "" {
+		return addr
+	}
+	return req.RemoteAddr
 }
 
 // debugSession is session debug info.

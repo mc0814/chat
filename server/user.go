@@ -5,6 +5,8 @@ import (
 	"math/rand"
 	"time"
 
+	"slices"
+
 	"github.com/tinode/chat/server/auth"
 	"github.com/tinode/chat/server/logs"
 	"github.com/tinode/chat/server/push"
@@ -38,9 +40,9 @@ func replyCreateUser(s *Session, msg *ClientComMessage, rec *auth.Rec) {
 		return
 	}
 
-	// Check if login is unique.
+	// Check if login is unique and compliance with the policy (not too long or too short).
 	if ok, err := authhdl.IsUnique(msg.Acc.Secret, s.remoteAddr); !ok {
-		logs.Warn.Println("create user: auth secret is not unique", err, "sid=", s.sid)
+		logs.Warn.Println("create user: auth secret is not compliant", err, "sid=", s.sid)
 		s.queueOut(decodeStoreError(err, msg.Id, msg.Timestamp,
 			map[string]any{"what": "auth"}))
 		return
@@ -69,7 +71,7 @@ func replyCreateUser(s *Session, msg *ClientComMessage, rec *auth.Rec) {
 	}
 
 	// Ensure tags are unique and not restricted.
-	if tags := normalizeTags(msg.Acc.Tags); tags != nil {
+	if tags := normalizeTags(msg.Acc.Tags, globals.maxTagCount); tags != nil {
 		if !restrictedTagsEqual(tags, nil, globals.immutableTagNS) {
 			logs.Warn.Println("create user: attempt to directly assign restricted tags, sid=", s.sid)
 			msg := ErrPermissionDenied(msg.Id, "", msg.Timestamp)
@@ -105,14 +107,14 @@ func replyCreateUser(s *Session, msg *ClientComMessage, rec *auth.Rec) {
 		if msg.Acc.Desc.DefaultAcs != nil {
 			if msg.Acc.Desc.DefaultAcs.Auth != "" {
 				user.Access.Auth.UnmarshalText([]byte(msg.Acc.Desc.DefaultAcs.Auth))
-				user.Access.Auth &= types.ModeCP2P
+				user.Access.Auth &= globals.typesModeCP2P
 				if user.Access.Auth != types.ModeNone {
 					user.Access.Auth |= types.ModeApprove
 				}
 			}
 			if msg.Acc.Desc.DefaultAcs.Anon != "" {
 				user.Access.Anon.UnmarshalText([]byte(msg.Acc.Desc.DefaultAcs.Anon))
-				user.Access.Anon &= types.ModeCP2P
+				user.Access.Anon &= globals.typesModeCP2P
 				if user.Access.Anon != types.ModeNone {
 					user.Access.Anon |= types.ModeApprove
 				}
@@ -329,7 +331,7 @@ func replyUpdateUser(s *Session, msg *ClientComMessage, rec *auth.Rec) {
 }
 
 // Authentication update
-func updateUserAuth(msg *ClientComMessage, user *types.User, rec *auth.Rec, remoteAddr string) error {
+func updateUserAuth(msg *ClientComMessage, user *types.User, _ *auth.Rec, remoteAddr string) error {
 	authhdl := store.Store.GetLogicalAuthHandler(msg.Acc.Scheme)
 	if authhdl != nil {
 		// Request to update auth of an existing account. Only basic & rest auth are currently supported
@@ -487,13 +489,7 @@ func deleteCred(uid types.Uid, authLvl auth.Level, cred *MsgCredClient) ([]strin
 	}
 
 	// Is this a required credential for this validation level?
-	var isRequired bool
-	for _, method := range globals.authValidators[authLvl] {
-		if method == cred.Method {
-			isRequired = true
-			break
-		}
-	}
+	isRequired := slices.Contains(globals.authValidators[authLvl], cred.Method)
 
 	// If credential is required, make sure the method remains validated even after this credential is deleted.
 	if isRequired {

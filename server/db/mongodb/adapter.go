@@ -9,6 +9,8 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -41,7 +43,7 @@ const (
 	defaultHost     = "localhost:27017"
 	defaultDatabase = "tinode"
 
-	adpVersion  = 113
+	adpVersion  = 114
 	adapterName = "mongodb"
 
 	defaultMaxResults = 1024
@@ -55,9 +57,9 @@ const (
 // See https://godoc.org/go.mongodb.org/mongo-driver/mongo/options#ClientOptions for explanations.
 type configType struct {
 	// Connection string URI https://www.mongodb.com/docs/manual/reference/connection-string/
-	Uri            string      `json:"uri,omitempty"`
-	Addresses      any `json:"addresses,omitempty"`
-	ConnectTimeout int         `json:"timeout,omitempty"`
+	Uri            string `json:"uri,omitempty"`
+	Addresses      any    `json:"addresses,omitempty"`
+	ConnectTimeout int    `json:"timeout,omitempty"`
 
 	// Options separately from ClientOptions (custom options):
 	Database   string `json:"database,omitempty"`
@@ -527,6 +529,13 @@ func (a *adapter) UpgradeDb() error {
 		}
 
 		if err := bumpVersion(a, 113); err != nil {
+			return err
+		}
+	}
+
+	if a.version == 113 {
+		// Version 114: topics.aux added, fileuploads.etag added..
+		if err := bumpVersion(a, 114); err != nil {
 			return err
 		}
 	}
@@ -1456,6 +1465,7 @@ func (a *adapter) TopicGet(topic string) (*t.Topic, error) {
 	}
 	tpc.Public = unmarshalBsonD(tpc.Public)
 	tpc.Trusted = unmarshalBsonD(tpc.Trusted)
+	// tpc.Aux = unmarshalBsonD(tpc.Aux)
 	return tpc, nil
 }
 
@@ -2053,100 +2063,196 @@ func (a *adapter) subsDelete(ctx context.Context, filter b.M, hard bool) error {
 	return err
 }
 
-// Search
-func (a *adapter) getFindPipeline(req [][]string, opt []string, activeOnly bool) (map[string]struct{}, b.A) {
-	allReq := t.FlattenDoubleSlice(req)
+// Find searches for contacts and topics given a list of tags.
+func (a *adapter) Find(caller, prefPrefix string, req [][]string, opt []string, activeOnly bool) ([]t.Subscription, error) {
+	/*
+		// MongoDB aggregation pipeline using unionWith.
+		[
+			{ $match: { tags: { $in: ["basic:alice", "travel"] } } },
+			{ $unionWith: {
+					coll: "topics",
+					pipeline: [ { $match: { tags: { $in: ["basic:alice", "travel"] } } } ]
+				}
+			},
+			{ $project: { _id: 1, access: 1, createdat: 1, updatedat: 1, usebt: 1, public: 1, trusted: 1, tags: 1, _source: 1 } },
+			{ $addFields: { matchedCount: { $sum: { $map: {
+				input: { $setIntersection: [ "$tags", [ "alias:aliassa", "basic:alice", "travel" ] ] },
+				as: "tag",
+				in: { $cond: { if: { $regexMatch: { input: "$$tag", regex: "^alias:"} }, then: 20, else: 1 } }
+			} }}}},
+			{ $match: { $expr: { $ne: [ { $size: { $setIntersection: [ "$tags", ["basic:alice", "travel"] ] } }, 0 ] } } },
+			{ $sort: { matchedCount: -1 } },
+			{ $limit: 20 }
+		]
+
+		// Alternative approach using $facet for (supposedly) better performance:
+		[ { $facet: {
+					users: [
+						{ $match: { tags: { $in: [ "alias:alice", "basic:alice", "travel" ] } } },
+						{ $project: { _id: 1, access: 1, createdat: 1, updatedat: 1, usebt: 1, public: 1, trusted: 1, tags: 1 } }
+					],
+					topics: [
+						{ $lookup: {
+							from: "topics",
+							pipeline: [
+								{ $match: { tags: { $in: [ "alias:alice", "basic:alice", "travel" ] } } },
+								{ $project: { _id: 1, access: 1, createdat: 1, updatedat: 1, usebt: 1, public: 1, trusted: 1, tags: 1 } } }
+							],
+							as: "topicDocs"
+						}},
+						{ $unwind: "$topicDocs" },
+						{ $replaceRoot: { newRoot: "$topicDocs" } }
+					]
+				}
+			},
+			{ $project: { combined: { $concatArrays: ["$users", "$topics"] } } },
+			{ $unwind: "$combined" },
+			{ $replaceRoot: { newRoot: "$combined" } },
+			{ $group: { _id: "$_id", doc: { $first: "$$ROOT" } } },
+			{ $replaceRoot: { newRoot: "$doc" } },
+			{ $addFields: { matchedCount:
+				{ $sum: { $map: { input:
+					{ $setIntersection: [ "$tags", [ "alias:alice", "basic:alice", "travel" ] ] },
+					as: "tag",
+					in: {
+					$cond: {
+						if: { $regexMatch: { input: "$$tag", regex: "^alias:" } }, then: 20, else: 1 }
+					}
+				} }
+			} } },
+			{ $match: { $expr: { $ne: [
+				{ $size: { $setIntersection: [ "$tags", [ "alias:alice", "basic:alice", "travel" ] ] } },
+				0
+			] } } },
+			{ $sort: { matchedCount: -1 } },
+			{ $limit: 20 }
+		]
+	*/
+
 	index := make(map[string]struct{})
+	allReq := t.FlattenDoubleSlice(req)
 	var allTags []any
 	for _, tag := range append(allReq, opt...) {
 		allTags = append(allTags, tag)
 		index[tag] = struct{}{}
 	}
 
-	matchOn := b.M{"tags": b.M{"$in": allTags}}
-	if activeOnly {
-		matchOn["state"] = b.M{"$eq": t.StateOK}
-	}
-	pipeline := b.A{
-		b.M{"$match": matchOn},
-
-		b.M{"$project": b.M{"_id": 1, "access": 1, "createdat": 1, "updatedat": 1, "public": 1, "trusted": 1, "tags": 1}},
-
-		b.M{"$unwind": "$tags"},
-
-		b.M{"$match": b.M{"tags": b.M{"$in": allTags}}},
-
-		b.M{"$group": b.M{
-			"_id":              "$_id",
-			"access":           b.M{"$first": "$access"},
-			"createdat":        b.M{"$first": "$createdat"},
-			"updatedat":        b.M{"$first": "$updatedat"},
-			"public":           b.M{"$first": "$public"},
-			"trusted":          b.M{"$first": "$trusted"},
-			"tags":             b.M{"$addToSet": "$tags"},
-			"matchedTagsCount": b.M{"$sum": 1},
-		}},
-
-		b.M{"$sort": b.M{"matchedTagsCount": -1}},
-	}
-
-	for _, l := range req {
-		var reqTags []any
-		for _, tag := range l {
-			reqTags = append(reqTags, tag)
+	/*
+		matchOn := b.M{"tags": b.M{"$in": allTags}}
+		if activeOnly {
+			matchOn["state"] = b.M{"$eq": t.StateOK}
+		}
+		commonPipe := b.A{
+			b.M{"$match": matchOn},
+			b.M{"$project": b.M{"_id": 1, "createdat": 1, "updatedat": 1, "usebt": 1, "access": 1, "public": 1, "trusted": 1, "tags": 1}},
+			b.M{"$unwind": "$tags"},
+			b.M{"$match": b.M{"tags": b.M{"$in": allTags}}},
+			b.M{"$group": b.M{
+				"_id":              "$_id",
+				"createdat":        b.M{"$first": "$createdat"},
+				"updatedat":        b.M{"$first": "$updatedat"},
+				"usebt":            b.M{"$first": "$usebt"},
+				"access":           b.M{"$first": "$access"},
+				"public":           b.M{"$first": "$public"},
+				"trusted":          b.M{"$first": "$trusted"},
+				"tags":             b.M{"$addToSet": "$tags"},
+				"matchedTagsCount": b.M{"$sum": 1},
+			}},
 		}
 
-		// Filter out documents where 'tags' intersection with 'reqTags' is an empty array
+		for _, reqDisjunction := range req {
+			if len(reqDisjunction) == 0 {
+				continue
+			}
+			var reqTags []any
+			for _, tag := range reqDisjunction {
+				reqTags = append(reqTags, tag)
+			}
+			// Filter out documents where 'tags' intersection with 'reqTags' is an empty array
+			commonPipe = append(commonPipe,
+				b.M{"$match": b.M{"$expr": b.M{"$ne": b.A{b.M{"$size": b.M{"$setIntersection": b.A{"$tags", reqTags}}}, 0}}}})
+		}
+
+		// Must create a copy of commonPipe so the original commonPipe can be used unmodified in $unionWith.
+		pipeline := append(slices.Clone(commonPipe),
+			b.M{"$unionWith": b.M{"coll": "topics", "pipeline": commonPipe}},
+			b.M{"$sort": b.M{"matchedTagsCount": -1}},
+			b.M{"$limit": a.maxResults})
+	*/
+
+	projectFields := b.M{"_id": 1, "createdat": 1, "updatedat": 1, "usebt": 1,
+		"access": 1, "public": 1, "trusted": 1, "tags": 1}
+
+	pipeline := b.A{
+		// Stage 1: $facet
+		b.M{
+			"$facet": b.D{
+				{"users", b.A{
+					b.M{"$match": b.M{"tags": b.M{"$in": allTags}}},
+					b.M{"$project": projectFields},
+				}},
+				{"topics", b.A{
+					b.M{"$lookup": b.D{
+						{"from", "topics"},
+						{"pipeline", b.A{
+							b.M{"$match": b.M{"tags": b.M{"$in": allTags}}},
+							b.M{"$project": projectFields},
+						}},
+						{"as", "topicDocs"},
+					}},
+					b.M{"$unwind": "$topicDocs"},
+					b.M{"$replaceRoot": b.M{"newRoot": "$topicDocs"}},
+				}},
+			},
+		},
+		// Stage 2: $project
+		b.M{"$project": b.M{"combined": b.M{"$concatArrays": b.A{"$users", "$topics"}}}},
+		// Stage 3: $unwind
+		b.M{"$unwind": "$combined"},
+		// Stage 4: $replaceRoot
+		b.M{"$replaceRoot": b.M{"newRoot": "$combined"}},
+		// Stage 5: $group
+		b.M{"$group": b.D{{"_id", "$_id"}, {"doc", b.M{"$first": "$$ROOT"}}}},
+		// Stage 6: $replaceRoot
+		b.M{"$replaceRoot": b.M{"newRoot": "$doc"}},
+		// Stage 7: $addFields
+		b.M{"$addFields": b.M{"matchedCount": b.M{"$sum": b.M{"$map": b.D{
+			{"input", b.M{"$setIntersection": b.A{"$tags", allTags}}},
+			{"as", "tag"},
+			{"in", b.D{
+				{"$cond", b.D{
+					{"if", b.M{"$regexMatch": b.D{
+						{"input", "$$tag"},
+						{"regex", "^alias:"},
+					},
+					}},
+					{"then", 20},
+					{"else", 1},
+				}}}}},
+		}}}},
+	}
+
+	for _, reqDisjunction := range req {
+		if len(reqDisjunction) == 0 {
+			continue
+		}
+		var reqTags []any
+		for _, tag := range reqDisjunction {
+			reqTags = append(reqTags, tag)
+		}
+		// Filter out documents where 'tags' intersection with 'reqTags' is an empty array.
 		pipeline = append(pipeline,
 			b.M{"$match": b.M{"$expr": b.M{"$ne": b.A{b.M{"$size": b.M{"$setIntersection": b.A{"$tags", reqTags}}}, 0}}}})
 	}
 
-	return index, append(pipeline, b.M{"$limit": a.maxResults})
-}
+	pipeline = append(pipeline,
+		// Stage 9: $sort
+		b.M{"$sort": b.M{"matchedCount": -1}},
+		// Stage 10: $limit
+		b.M{"$limit": a.maxResults},
+	)
 
-// FindUsers searches for new contacts given a list of tags
-func (a *adapter) FindUsers(uid t.Uid, req [][]string, opt []string, activeOnly bool) ([]t.Subscription, error) {
-	index, pipeline := a.getFindPipeline(req, opt, activeOnly)
 	cur, err := a.db.Collection("users").Aggregate(a.ctx, pipeline)
-	if err != nil {
-		return nil, err
-	}
-	defer cur.Close(a.ctx)
-
-	var subs []t.Subscription
-	for cur.Next(a.ctx) {
-		var user t.User
-		var sub t.Subscription
-		if err = cur.Decode(&user); err != nil {
-			return nil, err
-		}
-		if user.Id == uid.String() {
-			// Skip the caller
-			continue
-		}
-		sub.CreatedAt = user.CreatedAt
-		sub.UpdatedAt = user.UpdatedAt
-		sub.User = user.Id
-		sub.SetPublic(unmarshalBsonD(user.Public))
-		sub.SetTrusted(unmarshalBsonD(user.Trusted))
-		sub.SetDefaultAccess(user.Access.Auth, user.Access.Anon)
-		tags := make([]string, 0, 1)
-		for _, tag := range user.Tags {
-			if _, ok := index[tag]; ok {
-				tags = append(tags, tag)
-			}
-		}
-		sub.Private = tags
-		subs = append(subs, sub)
-	}
-
-	return subs, nil
-}
-
-// FindTopics searches for group topics given a list of tags
-func (a *adapter) FindTopics(req [][]string, opt []string, activeOnly bool) ([]t.Subscription, error) {
-	index, pipeline := a.getFindPipeline(req, opt, activeOnly)
-	cur, err := a.db.Collection("topics").Aggregate(a.ctx, pipeline)
 	if err != nil {
 		return nil, err
 	}
@@ -2157,30 +2263,73 @@ func (a *adapter) FindTopics(req [][]string, opt []string, activeOnly bool) ([]t
 		var topic t.Topic
 		var sub t.Subscription
 		if err = cur.Decode(&topic); err != nil {
-			return nil, err
+			break
+		}
+
+		if topic.UseBt {
+			sub.Topic = t.GrpToChn(topic.Id)
+		} else {
+			if uid := t.ParseUid(topic.Id); !uid.IsZero() {
+				topic.Id = uid.UserId()
+				if topic.Id == caller {
+					// Skip the caller.
+					continue
+				}
+			}
+			sub.Topic = topic.Id
 		}
 
 		sub.CreatedAt = topic.CreatedAt
 		sub.UpdatedAt = topic.UpdatedAt
-		if topic.UseBt {
-			sub.Topic = t.GrpToChn(topic.Id)
-		} else {
-			sub.Topic = topic.Id
-		}
 		sub.SetPublic(unmarshalBsonD(topic.Public))
 		sub.SetTrusted(unmarshalBsonD(topic.Trusted))
 		sub.SetDefaultAccess(topic.Access.Auth, topic.Access.Anon)
-		tags := make([]string, 0, 1)
-		for _, tag := range topic.Tags {
-			if _, ok := index[tag]; ok {
-				tags = append(tags, tag)
-			}
-		}
-		sub.Private = tags
+		// Indicating that the mode is not set, not 'N'.
+		sub.ModeGiven = t.ModeUnset
+		sub.ModeWant = t.ModeUnset
+		sub.Private = common.FilterFoundTags(topic.Tags, index)
 		subs = append(subs, sub)
 	}
 
-	return subs, nil
+	if err == nil {
+		err = cur.Err()
+	}
+
+	return subs, err
+}
+
+// FindOne returns topic or user which matches the given tag.
+func (a *adapter) FindOne(tag string) (string, error) {
+	// Part of the pipeline identical for users and topics collections.
+	commonPipe := b.A{b.M{"$match": b.M{"tags": tag}}, b.M{"$project": b.M{"_id": 1}}}
+
+	// Must create a copy of commonPipe so the original commonPipe can be used unmodified in $unionWith.
+	pipeline := append(slices.Clone(commonPipe),
+		b.M{"$unionWith": b.M{"coll": "topics", "pipeline": commonPipe}},
+		b.M{"$limit": 1})
+	cur, err := a.db.Collection("users").Aggregate(a.ctx, pipeline)
+	if err != nil {
+		return "", err
+	}
+	defer cur.Close(a.ctx)
+
+	var found string
+	if cur.Next(a.ctx) {
+		entry := map[string]any{}
+		if err = cur.Decode(&entry); err != nil {
+			return "", err
+		}
+
+		if id, ok := entry["_id"].(string); ok {
+			if user := t.ParseUid(id); !user.IsZero() {
+				found = user.UserId()
+			} else {
+				found = id
+			}
+		}
+	}
+
+	return found, cur.Err()
 }
 
 // Messages
@@ -2260,6 +2409,24 @@ func (a *adapter) messagesHardDelete(topic string) error {
 	return err
 }
 
+// rangeToFilter is Mongo's equivalent of common.RangeToSql.
+func rangeToFilter(delRanges []t.Range, filter b.M) b.M {
+	if len(delRanges) > 1 || delRanges[0].Hi <= delRanges[0].Low {
+		rangeFilter := b.A{}
+		for _, rng := range delRanges {
+			if rng.Hi == 0 {
+				rangeFilter = append(rangeFilter, b.M{"seqid": rng.Low})
+			} else {
+				rangeFilter = append(rangeFilter, b.M{"seqid": b.M{"$gte": rng.Low, "$lte": rng.Hi}})
+			}
+		}
+		filter["$or"] = rangeFilter
+	} else {
+		filter["seqid"] = b.M{"$gte": delRanges[0].Low, "$lte": delRanges[0].Hi}
+	}
+	return filter
+}
+
 // MessageDeleteList marks messages as deleted.
 // Soft- or Hard- is defined by forUser value: forUSer.IsZero == true is hard.
 func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) error {
@@ -2272,32 +2439,62 @@ func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) error {
 
 	// Only some messages are being deleted
 
-	// Start with making a log entry
-	_, err = a.db.Collection("dellog").InsertOne(a.ctx, toDel)
-	if err != nil {
-		return err
-	}
-
+	delRanges := toDel.SeqIdRanges
 	filter := b.M{
 		"topic": topic,
 		// Skip already hard-deleted messages.
 		"delid": b.M{"$exists": false},
 	}
-	if len(toDel.SeqIdRanges) > 1 || toDel.SeqIdRanges[0].Hi <= toDel.SeqIdRanges[0].Low {
-		rangeFilter := b.A{}
-		for _, rng := range toDel.SeqIdRanges {
-			if rng.Hi == 0 {
-				rangeFilter = append(rangeFilter, b.M{"seqid": rng.Low})
-			} else {
-				rangeFilter = append(rangeFilter, b.M{"seqid": b.M{"$gte": rng.Low, "$lte": rng.Hi}})
-			}
-		}
-		filter["$or"] = rangeFilter
-	} else {
-		filter["seqid"] = b.M{"$gte": toDel.SeqIdRanges[0].Low, "$lte": toDel.SeqIdRanges[0].Hi}
-	}
+	// Mongo's equivalent of common.RangeToSql
+	rangeToFilter(delRanges, filter)
 
 	if toDel.DeletedFor == "" {
+		// Hard-deleting messages requires updates to the messages table.
+
+		// We are asked to delete messages no older than newerThan.
+		if newerThan := toDel.GetNewerThan(); newerThan != nil {
+			filter["createdat"] = b.M{"$gt": newerThan}
+		}
+
+		pipeline := b.A{
+			b.M{"$match": filter},
+			b.M{"$project": b.M{"seqid": 1}},
+		}
+
+		// Find the actual IDs still present in the database.
+
+		cur, err := a.db.Collection("messages").Aggregate(a.ctx, pipeline)
+		if err != nil {
+			return err
+		}
+		defer cur.Close(a.ctx)
+
+		var seqIDs []int
+		for cur.Next(a.ctx) {
+			var result struct {
+				SeqID int `bson:"seqid"`
+			}
+			if err = cur.Decode(&result); err != nil {
+				return err
+			}
+			seqIDs = append(seqIDs, result.SeqID)
+		}
+
+		if len(seqIDs) == 0 {
+			// Nothing to delete. No need to make a log entry. All done.
+			return nil
+		}
+
+		// Recalculate the actual ranges to delete.
+		sort.Ints(seqIDs)
+		delRanges = t.SliceToRanges(seqIDs)
+
+		// Compose a new query with the new ranges.
+		filter = b.M{
+			"topic": topic,
+		}
+		rangeToFilter(delRanges, filter)
+
 		if err = a.decFileUseCounter(a.ctx, "messages", filter); err != nil {
 			return err
 		}
@@ -2315,6 +2512,7 @@ func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) error {
 
 		// Skip messages already soft-deleted for the current user
 		filter["deletedfor.user"] = b.M{"$ne": toDel.DeletedFor}
+
 		_, err = a.db.Collection("messages").UpdateMany(a.ctx, filter,
 			b.M{"$addToSet": b.M{
 				"deletedfor": &t.SoftDelete{
@@ -2323,10 +2521,8 @@ func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) error {
 				}}})
 	}
 
-	// If operation has failed, remove dellog record.
-	if err != nil {
-		_, _ = a.db.Collection("dellog").DeleteOne(a.ctx, b.M{"_id": toDel.Id})
-	}
+	// Make log entries. Needed for both hard- and soft-deleting.
+	_, err = a.db.Collection("dellog").InsertOne(a.ctx, toDel)
 	return err
 }
 
@@ -2505,6 +2701,8 @@ func (a *adapter) FileFinishUpload(fd *t.FileDef, success bool, size int64) (*t.
 				"updatedat": now,
 				"status":    t.UploadCompleted,
 				"size":      size,
+				"etag":      fd.ETag,
+				"location":  fd.Location,
 			}}); err != nil {
 
 			return nil, err
@@ -2738,8 +2936,8 @@ func (a *adapter) isDbInitialized() bool {
 	return true
 }
 
-// GetTestAdapter returns an adapter object. It's required for running tests.
-func GetTestAdapter() *adapter {
+// GetTestingAdapter returns an adapter object. Useful for running tests.
+func GetTestingAdapter() *adapter {
 	return &adapter{}
 }
 
@@ -2786,8 +2984,8 @@ func normalizeUpdateMap(update map[string]any) map[string]any {
 }
 
 // Recursive unmarshalling of bson.D type.
-// Mongo drivers unmarshalling into any creates bson.D object for maps and bson.A object for slices.
-// We need manually unmarshal them into correct types: map[string]any and []interface{] respectively.
+// Mongo drivers unmarshalling into 'any' creates bson.D object for maps and bson.A object for slices.
+// We need to manually unmarshal them into correct types: map[string]any and []any respectively.
 func unmarshalBsonD(bsonObj any) any {
 	if obj, ok := bsonObj.(b.D); ok && len(obj) != 0 {
 		result := make(map[string]any)

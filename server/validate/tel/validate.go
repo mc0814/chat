@@ -25,7 +25,7 @@ type validator struct {
 	Languages []string `json:"languages"`
 	// Path to email validation and password reset templates, either a template itself or a literal string.
 	UniversalTemplFile string `json:"universal_templ"`
-	// Sender address.
+	// Sender address (phone number).
 	Sender string `json:"sender"`
 	// Debug response to accept during testing.
 	DebugResponse string `json:"debug_response"`
@@ -33,6 +33,8 @@ type validator struct {
 	MaxRetries int `json:"max_retries"`
 	// Length of secret numeric code to sent for validation.
 	CodeLength int `json:"code_length"`
+	// Twilio-specific config.
+	Twilio json.RawMessage `json:"twilio_conf"`
 
 	// Must use index into language array instead of language tags because language.Matcher is brain damaged:
 	// https://github.com/golang/go/issues/24211
@@ -93,6 +95,12 @@ func (v *validator) Init(jsonconf string) error {
 		}
 	}
 
+	if v.Twilio != nil {
+		if err = twilioInit(v.Twilio); err != nil {
+			return err
+		}
+	}
+
 	if v.Sender == "" {
 		v.Sender = defaultSender
 	}
@@ -114,7 +122,7 @@ func (v *validator) IsInitialized() bool {
 
 // PreCheck validates the credential and parameters without sending an SMS or making the call.
 // If credential is valid, it's formatted and prefixed with a tag namespace.
-func (*validator) PreCheck(cred string, params map[string]interface{}) (string, error) {
+func (*validator) PreCheck(cred string, params map[string]any) (string, error) {
 	// Parse will try to extract the number from any text, make sure it's just the number.
 	if !phonenumbers.VALID_PHONE_NUMBER_PATTERN.MatchString(cred) {
 		return "", t.ErrMalformed
@@ -160,7 +168,7 @@ func (v *validator) Request(user t.Uid, phone, lang, resp string, tmpToken []byt
 		template = v.universalTempl[0]
 	}
 
-	content, err := validate.ExecuteTemplate(template, nil, map[string]interface{}{
+	content, err := validate.ExecuteTemplate(template, nil, map[string]any{
 		"Code":    resp,
 		"HostUrl": v.HostUrl})
 	if err != nil {
@@ -184,7 +192,7 @@ func (v *validator) Request(user t.Uid, phone, lang, resp string, tmpToken []byt
 }
 
 // ResetSecret sends a message with instructions for resetting an authentication secret.
-func (v *validator) ResetSecret(phone, scheme, lang string, code []byte, params map[string]interface{}) error {
+func (v *validator) ResetSecret(phone, scheme, lang string, code []byte, params map[string]any) error {
 	var template *textt.Template
 	if v.langMatcher != nil {
 		_, idx := i18n.MatchStrings(v.langMatcher, lang)
@@ -193,7 +201,7 @@ func (v *validator) ResetSecret(phone, scheme, lang string, code []byte, params 
 		template = v.universalTempl[0]
 	}
 
-	content, err := validate.ExecuteTemplate(template, nil, map[string]interface{}{
+	content, err := validate.ExecuteTemplate(template, nil, map[string]any{
 		"Code":    string(code),
 		"HostUrl": v.HostUrl})
 	if err != nil {
@@ -254,8 +262,14 @@ func (v *validator) TempAuthScheme() (string, error) {
 }
 
 // Implement sending the SMS.
-func (*validator) send(to, body string) error {
-	logs.Info.Println("Send SMS, To:", to, "\nText:", body)
+func (v *validator) send(to, body string) error {
+	if v.Twilio != nil {
+		if err := twilioSend(v.Sender, to, body); err != nil {
+			logs.Warn.Println("Twilio SMS error", to, err)
+		}
+	} else {
+		logs.Info.Println("Send SMS, To:", to, "\nText:", body)
+	}
 	return nil
 }
 

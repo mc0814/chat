@@ -154,7 +154,7 @@ func (Handler) Init(jsonconf json.RawMessage) (bool, error) {
 	return true, nil
 }
 
-func postMessage(endpoint string, body interface{}, config *configType) (*batchResponse, error) {
+func postMessage(endpoint string, body any, config *configType) (*batchResponse, error) {
 	buf := new(bytes.Buffer)
 	gzw := gzip.NewWriter(buf)
 	err := json.NewEncoder(gzw).Encode(body)
@@ -209,11 +209,8 @@ func sendPushes(rcpt *push.Receipt, config *configType) {
 
 	n := len(messages)
 	for i := 0; i < n; i += pushBatchSize {
-		upper := i + pushBatchSize
-		if upper > n {
-			upper = n
-		}
-		var payloads []interface{}
+		upper := min(i+pushBatchSize, n)
+		var payloads []any
 		for j := i; j < upper; j++ {
 			payloads = append(payloads, messages[j])
 		}

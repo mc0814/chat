@@ -51,10 +51,10 @@ ENV SAMPLE_DATA=$SAMPLE_DATA
 ENV DEFAULT_COUNTRY_CODE=US
 
 # The MySQL DSN connection.
-ENV MYSQL_DSN='root@tcp(mysql)/tinode'
+ENV MYSQL_DSN='root@tcp(mysql)/tinode?parseTime=true&collation=utf8mb4_0900_ai_ci'
 
 # The PostgreSQL DSN connection.
-ENV POSTGRES_DSN='postgresql://postgres:postgres@localhost:5432/tinode'
+ENV POSTGRES_DSN='postgresql://postgres:postgres@localhost:5432/tinode?sslmode=disable&connect_timeout=10'
 
 # Disable chatbot plugin by default.
 ENV PLUGIN_PYTHON_CHAT_BOT_ENABLED=false
@@ -71,6 +71,7 @@ ENV AWS_ACCESS_KEY_ID=
 ENV AWS_SECRET_ACCESS_KEY=
 ENV AWS_REGION=
 ENV AWS_S3_BUCKET=
+ENV AWS_S3_ENDPOINT=
 
 # Default externally-visible hostname for email verification.
 ENV SMTP_HOST_URL='http://localhost:6060'

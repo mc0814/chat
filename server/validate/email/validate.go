@@ -20,6 +20,8 @@ import (
 	"strings"
 	textt "text/template"
 
+	"slices"
+
 	"github.com/tinode/chat/server/logs"
 	"github.com/tinode/chat/server/store"
 	t "github.com/tinode/chat/server/store/types"
@@ -219,7 +221,7 @@ func (v *validator) IsInitialized() bool {
 
 // PreCheck validates the credential and parameters without sending an email.
 // If the credential is valid, it's returned with an appropriate prefix.
-func (v *validator) PreCheck(cred string, _ map[string]interface{}) (string, error) {
+func (v *validator) PreCheck(cred string, _ map[string]any) (string, error) {
 	if len(cred) > maxEmailLength {
 		return "", t.ErrMalformed
 	}
@@ -241,15 +243,7 @@ func (v *validator) PreCheck(cred string, _ map[string]interface{}) (string, err
 			return "", t.ErrMalformed
 		}
 
-		var found bool
-		for _, domain := range v.Domains {
-			if domain == parts[1] {
-				found = true
-				break
-			}
-		}
-
-		if !found {
+		if !slices.Contains(v.Domains, parts[1]) {
 			return "", t.ErrPolicy
 		}
 	}
@@ -280,13 +274,18 @@ func (v *validator) Request(user t.Uid, email, lang, resp string, tmpToken []byt
 
 	var template *textt.Template
 	if v.langMatcher != nil {
-		_, idx := i18n.MatchStrings(v.langMatcher, lang)
+		// Find the template for the requested language.
+		// Make sure the language tag is standardized. Matcher is a bit dumber than Parse().
+		normalized, _ := i18n.Parse(lang)
+		// The matched tag is usually not in the list of available languages (e.g. es_ES -> es-u-rg-eszzzz).
+		// Use index to find the template instead of tag.
+		_, idx := i18n.MatchStrings(v.langMatcher, normalized.String())
 		template = v.validationTempl[idx]
 	} else {
 		template = v.validationTempl[0]
 	}
 
-	content, err := validate.ExecuteTemplate(template, templateParts, map[string]interface{}{
+	content, err := validate.ExecuteTemplate(template, templateParts, map[string]any{
 		"Token":   url.QueryEscape(string(token)),
 		"Code":    resp,
 		"HostUrl": v.HostUrl})
@@ -311,7 +310,7 @@ func (v *validator) Request(user t.Uid, email, lang, resp string, tmpToken []byt
 }
 
 // ResetSecret sends a message with instructions for resetting an authentication secret.
-func (v *validator) ResetSecret(email, scheme, lang string, code []byte, params map[string]interface{}) error {
+func (v *validator) ResetSecret(email, scheme, lang string, code []byte, params map[string]any) error {
 	// Normalize email to make sure Unicode case collisions don't lead to security problems.
 	email = strings.ToLower(email)
 
@@ -329,7 +328,7 @@ func (v *validator) ResetSecret(email, scheme, lang string, code []byte, params 
 		login = params["login"].(string)
 	}
 
-	content, err := validate.ExecuteTemplate(template, templateParts, map[string]interface{}{
+	content, err := validate.ExecuteTemplate(template, templateParts, map[string]any{
 		"Login":   login,
 		"Code":    string(code),
 		"Cred":    email,

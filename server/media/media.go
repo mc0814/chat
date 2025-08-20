@@ -4,9 +4,12 @@ package media
 import (
 	"io"
 	"net/http"
+	"net/url"
 	"path"
 	"regexp"
 	"strings"
+
+	"slices"
 
 	"github.com/tinode/chat/server/store/types"
 )
@@ -26,10 +29,10 @@ type Handler interface {
 	// Headers checks if the handler wants to provide additional HTTP headers for the request.
 	// It could be CORS headers, redirect to serve files from another URL, cache-control headers.
 	// It returns headers as a map, HTTP status code to stop processing or 0 to continue, error.
-	Headers(req *http.Request, serve bool) (http.Header, int, error)
+	Headers(method string, url *url.URL, headers http.Header, serve bool) (http.Header, int, error)
 
 	// Upload processes request for file upload. Returns file URL, file size, error.
-	Upload(fdef *types.FileDef, file io.ReadSeeker) (string, int64, error)
+	Upload(fdef *types.FileDef, file io.Reader) (string, int64, error)
 
 	// Download processes request for file download.
 	Download(url string) (*types.FileDef, ReadSeekCloser, error)
@@ -80,57 +83,61 @@ func matchCORSOrigin(allowed []string, origin string) string {
 	return ""
 }
 
+// allowMethods must be in UPPERCASE.
 func matchCORSMethod(allowMethods []string, method string) bool {
 	if method == "" {
 		// Request has no Method header.
 		return false
 	}
 
-	method = strings.ToUpper(method)
-	for _, mm := range allowMethods {
-		if strings.ToUpper(mm) == method {
-			return true
-		}
-	}
-
-	return false
+	return slices.Contains(allowMethods, strings.ToUpper(method))
 }
 
-// CORSHandler is the default preflight OPTIONS processor for use by media handlers.
-func CORSHandler(req *http.Request, allowedOrigins []string, serve bool) (http.Header, int) {
-	if req.Method != http.MethodOptions {
-		// Not an OPTIONS request. No special handling for all other requests.
-		return nil, 0
-	}
-
-	var allowMethods []string
-	if serve {
-		allowMethods = []string{http.MethodGet, http.MethodHead, http.MethodOptions}
-	} else {
-		allowMethods = []string{http.MethodPost, http.MethodPut, http.MethodHead, http.MethodOptions}
-	}
-
-	headers := map[string][]string{
+// CORSHandler is the default CORS processor for use by media handlers. It adds CORS headers to
+// preflight OPTIONS requests, Vary & Access-Control-Allow-Origin headers to all responses.
+func CORSHandler(method string, reqHeader http.Header, allowedOrigins []string, serve bool) (http.Header, int) {
+	respHeader := map[string][]string{
 		// Always add Vary because of possible intermediate caches.
-		"Vary":                             {"Origin", "Access-Control-Request-Method"},
-		"Access-Control-Allow-Headers":     {"*"},
-		"Access-Control-Max-Age":           {"86400"},
-		"Access-Control-Allow-Credentials": {"true"},
-		"Access-Control-Allow-Methods":     {strings.Join(allowMethods, ", ")},
+		"Vary": {"Origin", "Access-Control-Request-Method, Access-Control-Request-Headers"},
 	}
 
-	if !matchCORSMethod(allowMethods, req.Header.Get("Access-Control-Request-Method")) {
-		// CORS policy does not allow this method.
-		return headers, http.StatusNoContent
+	origin := reqHeader.Get("Origin")
+
+	allowedOrigin := matchCORSOrigin(allowedOrigins, origin)
+	if acMethod := reqHeader.Get("Access-Control-Request-Method"); method == http.MethodOptions && acMethod != "" {
+		// Preflight request.
+
+		if allowedOrigin == "" {
+			return respHeader, http.StatusNoContent
+		}
+
+		var allowMethods []string
+		if serve {
+			allowMethods = []string{http.MethodGet, http.MethodHead, http.MethodOptions}
+		} else {
+			allowMethods = []string{http.MethodPost, http.MethodPut, http.MethodHead, http.MethodOptions}
+		}
+
+		if !matchCORSMethod(allowMethods, acMethod) {
+			// CORS policy does not allow this method.
+			return respHeader, http.StatusNoContent
+		}
+
+		respHeader["Access-Control-Allow-Headers"] = []string{"*"}
+		respHeader["Access-Control-Allow-Credentials"] = []string{"true"}
+		respHeader["Access-Control-Allow-Methods"] = []string{strings.Join(allowMethods, ", ")}
+		respHeader["Access-Control-Max-Age"] = []string{"86400"}
+		respHeader["Access-Control-Allow-Origin"] = []string{allowedOrigin}
+
+		return respHeader, http.StatusNoContent
 	}
 
-	allowedOrigin := matchCORSOrigin(allowedOrigins, req.Header.Get("Origin"))
-	if allowedOrigin == "" {
-		// CORS policy does not match the origin.
-		return headers, http.StatusNoContent
+	// Regular request, not a preflight.
+
+	if allowedOrigin != "" {
+		// Returning Origin from the actual request instead of '*', otherwise there could be an issue with Credentials.
+		respHeader["Access-Control-Allow-Origin"] = []string{origin}
 	}
 
-	headers["Access-Control-Allow-Origin"] = []string{allowedOrigin}
-
-	return headers, http.StatusNoContent
+	return respHeader, 0
 }

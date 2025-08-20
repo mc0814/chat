@@ -8,10 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tinode/chat/server/logs"
-
 	"github.com/tinode/chat/server/auth"
 	adapter "github.com/tinode/chat/server/db"
+	"github.com/tinode/chat/server/logs"
 	"github.com/tinode/chat/server/media"
 	"github.com/tinode/chat/server/store/types"
 	"github.com/tinode/chat/server/validate"
@@ -97,7 +96,7 @@ type PersistentStorageInterface interface {
 	UpgradeDb(jsonconf json.RawMessage) error
 	GetUid() types.Uid
 	GetUidString() string
-	DbStats() func() interface{}
+	DbStats() func() any
 	GetAuthNames() []string
 	GetAuthHandler(name string) auth.AuthHandler
 	GetLogicalAuthHandler(name string) auth.AuthHandler
@@ -218,7 +217,7 @@ func (storeObj) GetUid() types.Uid {
 	return uGen.Get()
 }
 
-// GetUidString generate unique ID as string
+// GetUidString generate unique ID as a string.
 func (storeObj) GetUidString() string {
 	return uGen.GetStr()
 }
@@ -242,7 +241,7 @@ func EncodeUid(id int64) types.Uid {
 }
 
 // DbStats returns a callback returning db connection stats object.
-func (s storeObj) DbStats() func() interface{} {
+func (s storeObj) DbStats() func() any {
 	if !s.IsOpen() {
 		return nil
 	}
@@ -251,7 +250,7 @@ func (s storeObj) DbStats() func() interface{} {
 
 // UsersPersistenceInterface is an interface which defines methods for persistent storage of user records.
 type UsersPersistenceInterface interface {
-	Create(user *types.User, private interface{}) (*types.User, error)
+	Create(user *types.User, private any) (*types.User, error)
 	GetAuthRecord(user types.Uid, scheme string) (string, auth.Level, []byte, time.Time, error)
 	GetAuthUniqueRecord(scheme, unique string) (types.Uid, auth.Level, []byte, time.Time, error)
 	AddAuthRecord(uid types.Uid, authLvl auth.Level, scheme, unique string, secret []byte, expires time.Time) error
@@ -262,11 +261,12 @@ type UsersPersistenceInterface interface {
 	GetByCred(method, value string) (types.Uid, error)
 	Delete(id types.Uid, hard bool) error
 	UpdateLastSeen(uid types.Uid, userAgent string, when time.Time) error
-	Update(uid types.Uid, update map[string]interface{}) error
+	Update(uid types.Uid, update map[string]any) error
 	UpdateTags(uid types.Uid, add, remove, reset []string) ([]string, error)
 	UpdateState(uid types.Uid, state types.ObjState) error
 	GetSubs(id types.Uid) ([]types.Subscription, error)
-	FindSubs(id types.Uid, required [][]string, optional []string, activeOnly bool) ([]types.Subscription, error)
+	FindSubs(caller types.Uid, prefPrefix string, required [][]string, optional []string, activeOnly bool) ([]types.Subscription, error)
+	FindOne(tag string) (string, error)
 	GetTopics(id types.Uid, opts *types.QueryOpt) ([]types.Subscription, error)
 	GetTopicsAny(id types.Uid, opts *types.QueryOpt) ([]types.Subscription, error)
 	GetOwnTopics(id types.Uid) ([]string, error)
@@ -288,7 +288,7 @@ type usersMapper struct{}
 var Users UsersPersistenceInterface
 
 // Create inserts User object into a database, updates creation time and assigns UID
-func (usersMapper) Create(user *types.User, private interface{}) (*types.User, error) {
+func (usersMapper) Create(user *types.User, private any) (*types.User, error) {
 
 	user.SetUid(Store.GetUid())
 	user.InitTimes()
@@ -305,16 +305,16 @@ func (usersMapper) Create(user *types.User, private interface{}) (*types.User, e
 			ObjHeader: types.ObjHeader{CreatedAt: user.CreatedAt},
 			User:      user.Id,
 			Topic:     user.Uid().UserId(),
-			ModeWant:  types.ModeCSelf,
-			ModeGiven: types.ModeCSelf,
+			ModeWant:  types.ModeCMeFnd,
+			ModeGiven: types.ModeCMeFnd,
 			Private:   private,
 		},
 		&types.Subscription{
 			ObjHeader: types.ObjHeader{CreatedAt: user.CreatedAt},
 			User:      user.Id,
 			Topic:     user.Uid().FndName(),
-			ModeWant:  types.ModeCSelf,
-			ModeGiven: types.ModeCSelf,
+			ModeWant:  types.ModeCMeFnd,
+			ModeGiven: types.ModeCMeFnd,
 			Private:   nil,
 		})
 	if err != nil {
@@ -368,12 +368,12 @@ func (usersMapper) DelAuthRecords(uid types.Uid, scheme string) error {
 	return adp.AuthDelScheme(uid, scheme)
 }
 
-// Get returns a user object for the given user id
+// Get returns a user object for the given user ID or nil if the user is not found.
 func (usersMapper) Get(uid types.Uid) (*types.User, error) {
 	return adp.UserGet(uid)
 }
 
-// GetAll returns a slice of user objects for the given user ids
+// GetAll returns a slice of user objects for the given user IDs.
 func (usersMapper) GetAll(uid ...types.Uid) ([]types.User, error) {
 	return adp.UserGetAll(uid...)
 }
@@ -390,11 +390,11 @@ func (usersMapper) Delete(id types.Uid, hard bool) error {
 
 // UpdateLastSeen updates LastSeen and UserAgent.
 func (usersMapper) UpdateLastSeen(uid types.Uid, userAgent string, when time.Time) error {
-	return adp.UserUpdate(uid, map[string]interface{}{"LastSeen": when, "UserAgent": userAgent})
+	return adp.UserUpdate(uid, map[string]any{"LastSeen": when, "UserAgent": userAgent})
 }
 
 // Update is a general-purpose update of user data.
-func (usersMapper) Update(uid types.Uid, update map[string]interface{}) error {
+func (usersMapper) Update(uid types.Uid, update map[string]any) error {
 	if _, ok := update["UpdatedAt"]; !ok {
 		update["UpdatedAt"] = types.TimeNow()
 	}
@@ -408,7 +408,7 @@ func (usersMapper) UpdateTags(uid types.Uid, add, remove, reset []string) ([]str
 
 // UpdateState changes user's state and state of some topics associated with the user.
 func (usersMapper) UpdateState(uid types.Uid, state types.ObjState) error {
-	update := map[string]interface{}{
+	update := map[string]any{
 		"State":   state,
 		"StateAt": types.TimeNow()}
 	return adp.UserUpdate(uid, update)
@@ -424,24 +424,17 @@ func (usersMapper) GetSubs(id types.Uid) ([]types.Subscription, error) {
 // `required` specifies an AND of ORs for required terms:
 // at least one element of every sublist in `required` must be present in the object's tags list.
 // `optional` specifies a list of optional terms.
-func (usersMapper) FindSubs(id types.Uid, required [][]string, optional []string, activeOnly bool) ([]types.Subscription, error) {
-	usubs, err := adp.FindUsers(id, required, optional, activeOnly)
-	if err != nil {
-		return nil, err
+func (usersMapper) FindSubs(caller types.Uid, prefPrefix string, required [][]string, optional []string, activeOnly bool) ([]types.Subscription, error) {
+	if len(required) == 0 && len(optional) == 0 {
+		// No tags specified, return empty list.
+		return nil, nil
 	}
-	tsubs, err := adp.FindTopics(required, optional, activeOnly)
-	if err != nil {
-		return nil, err
-	}
+	return adp.Find(caller.UserId(), prefPrefix, required, optional, activeOnly)
+}
 
-	allSubs := append(usubs, tsubs...)
-	for i := range allSubs {
-		// Indicate that the returned access modes are not 'N', but rather undefined.
-		allSubs[i].ModeGiven = types.ModeUnset
-		allSubs[i].ModeWant = types.ModeUnset
-	}
-
-	return allSubs, nil
+// Find returns topics and/or users which match the given tag, with optional partial matching.
+func (usersMapper) FindOne(tag string) (string, error) {
+	return adp.FindOne(tag)
 }
 
 // GetTopics load a list of user's subscriptions with Public+Trusted fields copied to subscription
@@ -509,14 +502,14 @@ func (usersMapper) GetUnvalidated(lastUpdatedBefore time.Time, limit int) ([]typ
 
 // TopicsPersistenceInterface is an interface which defines methods for persistent storage of topics.
 type TopicsPersistenceInterface interface {
-	Create(topic *types.Topic, owner types.Uid, private interface{}) error
+	Create(topic *types.Topic, owner types.Uid, private any) error
 	CreateP2P(initiator, invited *types.Subscription) error
 	Get(topic string) (*types.Topic, error)
 	GetUsers(topic string, opts *types.QueryOpt) ([]types.Subscription, error)
 	GetUsersAny(topic string, opts *types.QueryOpt) ([]types.Subscription, error)
 	GetSubs(topic string, opts *types.QueryOpt) ([]types.Subscription, error)
 	GetSubsAny(topic string, opts *types.QueryOpt) ([]types.Subscription, error)
-	Update(topic string, update map[string]interface{}) error
+	Update(topic string, update map[string]any) error
 	OwnerChange(topic string, newOwner types.Uid) error
 	Delete(topic string, isChan, hard bool) error
 }
@@ -528,7 +521,7 @@ type topicsMapper struct{}
 var Topics TopicsPersistenceInterface
 
 // Create creates a topic and owner's subscription to it.
-func (topicsMapper) Create(topic *types.Topic, owner types.Uid, private interface{}) error {
+func (topicsMapper) Create(topic *types.Topic, owner types.Uid, private any) error {
 
 	topic.InitTimes()
 	topic.TouchedAt = topic.CreatedAt
@@ -592,7 +585,7 @@ func (topicsMapper) GetSubsAny(topic string, opts *types.QueryOpt) ([]types.Subs
 }
 
 // Update is a generic topic update.
-func (topicsMapper) Update(topic string, update map[string]interface{}) error {
+func (topicsMapper) Update(topic string, update map[string]any) error {
 	if _, ok := update["UpdatedAt"]; !ok {
 		update["UpdatedAt"] = types.TimeNow()
 	}
@@ -613,7 +606,7 @@ func (topicsMapper) Delete(topic string, isChan, hard bool) error {
 type SubsPersistenceInterface interface {
 	Create(subs ...*types.Subscription) error
 	Get(topic string, user types.Uid, keepDeleted bool) (*types.Subscription, error)
-	Update(topic string, user types.Uid, update map[string]interface{}) error
+	Update(topic string, user types.Uid, update map[string]any) error
 	Delete(topic string, user types.Uid) error
 }
 
@@ -638,7 +631,7 @@ func (subsMapper) Get(topic string, user types.Uid, keepDeleted bool) (*types.Su
 }
 
 // Update values of topic's subscriptions.
-func (subsMapper) Update(topic string, user types.Uid, update map[string]interface{}) error {
+func (subsMapper) Update(topic string, user types.Uid, update map[string]any) error {
 	update["UpdatedAt"] = types.TimeNow()
 	return adp.SubsUpdate(topic, user, update)
 }
@@ -651,7 +644,7 @@ func (subsMapper) Delete(topic string, user types.Uid) error {
 // MessagesPersistenceInterface is an interface which defines methods for persistent storage of messages.
 type MessagesPersistenceInterface interface {
 	Save(msg *types.Message, attachmentURLs []string, readBySender bool) (error, bool)
-	DeleteList(topic string, delID int, forUser types.Uid, ranges []types.Range) error
+	DeleteList(topic string, delID int, forUser types.Uid, msgDelAge time.Duration, ranges []types.Range) error
 	GetAll(topic string, forUser types.Uid, opt *types.QueryOpt) ([]types.Message, error)
 	GetDeleted(topic string, forUser types.Uid, opt *types.QueryOpt) ([]types.Range, int, error)
 	GetMessageByTopicSeqId(topic string, seqId int) (*types.Message, error)
@@ -690,7 +683,7 @@ func (messagesMapper) Save(msg *types.Message, attachmentURLs []string, readBySe
 		if !fromUid.IsZero() {
 			// Ignore the error here. It's not a big deal if it fails.
 			if subErr := adp.SubsUpdate(msg.Topic, fromUid,
-				map[string]interface{}{
+				map[string]any{
 					"RecvSeqId": msg.SeqId,
 					"ReadSeqId": msg.SeqId}); subErr != nil {
 				logs.Warn.Printf("topic[%s]: failed to mark message (seq: %d) read by sender - err: %+v", msg.Topic, msg.SeqId, subErr)
@@ -717,7 +710,7 @@ func (messagesMapper) Save(msg *types.Message, attachmentURLs []string, readBySe
 }
 
 // DeleteList deletes multiple messages defined by a list of ranges.
-func (messagesMapper) DeleteList(topic string, delID int, forUser types.Uid, ranges []types.Range) error {
+func (messagesMapper) DeleteList(topic string, delID int, forUser types.Uid, msgDelAge time.Duration, ranges []types.Range) error {
 	var toDel *types.DelMessage
 	if delID > 0 {
 		toDel = &types.DelMessage{
@@ -727,6 +720,9 @@ func (messagesMapper) DeleteList(topic string, delID int, forUser types.Uid, ran
 			SeqIdRanges: ranges}
 		toDel.SetUid(Store.GetUid())
 		toDel.InitTimes()
+		if msgDelAge > 0 {
+			toDel.SetNewerThan(toDel.CreatedAt.Add(-msgDelAge))
+		}
 	}
 
 	err := adp.MessageDeleteList(topic, toDel)
@@ -737,14 +733,14 @@ func (messagesMapper) DeleteList(topic string, delID int, forUser types.Uid, ran
 	// TODO: move to adapter.
 	if delID > 0 {
 		// Record ID of the delete transaction
-		err = adp.TopicUpdate(topic, map[string]interface{}{"DelId": delID})
+		err = adp.TopicUpdate(topic, map[string]any{"DelId": delID})
 		if err != nil {
 			return err
 		}
 
 		// Soft-deleting will update one subscription, hard-deleting will ipdate all.
 		// Soft- or hard- is defined by the forUser being defined.
-		err = adp.SubsUpdate(topic, forUser, map[string]interface{}{"DelId": delID})
+		err = adp.SubsUpdate(topic, forUser, map[string]any{"DelId": delID})
 		if err != nil {
 			return err
 		}

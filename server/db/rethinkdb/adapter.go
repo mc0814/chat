@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"hash/fnv"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -34,7 +35,7 @@ const (
 	defaultHost     = "localhost:28015"
 	defaultDatabase = "tinode"
 
-	adpVersion = 113
+	adpVersion = 114
 
 	adapterName = "rethinkdb"
 
@@ -553,6 +554,14 @@ func (a *adapter) UpgradeDb() error {
 		// Secondary indexes cannot store NULLs, consequently no useful indexes can be created.
 		// Just bump the version.
 		if err := bumpVersion(a, 113); err != nil {
+			return err
+		}
+	}
+
+	if a.version == 113 {
+		// Version 114: topics.aux added, fileuploads.etag added.
+		// Just bump the version.
+		if err := bumpVersion(a, 114); err != nil {
 			return err
 		}
 	}
@@ -1863,9 +1872,8 @@ func (a *adapter) subsDelForUser(user t.Uid, hard bool) error {
 	return err
 }
 
-// FindUsers returns a list of users who match given tags, such as "email:jdoe@example.com" or "tel:+18003287448".
-// Searching the 'users.Tags' for the given tags using respective index.
-func (a *adapter) FindUsers(uid t.Uid, req [][]string, opt []string, activeOnly bool) ([]t.Subscription, error) {
+// Find returns a list of users and topics who match the given tags, such as "email:jdoe@example.com" or "tel:+18003287448".
+func (a *adapter) Find(caller, promoPrefix string, req [][]string, opt []string, activeOnly bool) ([]t.Subscription, error) {
 	index := make(map[string]struct{})
 	allReq := t.FlattenDoubleSlice(req)
 	var allTags []any
@@ -1878,36 +1886,61 @@ func (a *adapter) FindUsers(uid t.Uid, req [][]string, opt []string, activeOnly 
 	/*
 		r.db('tinode').
 			table('users').
-			getAll(<all tags here>, {index: "Tags"}).
-			pluck("Id", "Access", "CreatedAt", "UpdatedAt", "Public", "Tags").
-			group("Id").ungroup().
-			map(function(row) { return row.getField('reduction').nth(0).merge({matchedCount: row.getField('reduction').count()}); }).
-			filter(function(row) { return row.getField("Tags").setIntersection([<required tags here>]).count().ne(0); }).
+			getAll('basic:alice', 'travel', {index: "Tags"}).
+			union(r.db('tinode').table('topics').getAll('basic:alice', 'travel', {index: "Tags"})).
+			pluck('Id', 'Access', 'CreatedAt', 'UpdatedAt', 'UseBt', 'Public', 'Trusted', 'Tags').
+			group('Id').
+			ungroup().
+			map(row => row.getField('reduction').nth(0).merge(
+				{matchedCount: row.getField('reduction').
+					getField('Tags').
+					nth(0).
+					setIntersection(['alias:aliassa', 'basic:alice', 'travel']).
+					map(tag => r.branch(tag.match('^alias:'), 20, 1)).
+					sum()
+				})).
+			filter(row => row.getField('Tags').setIntersection(['basic:alice', 'travel']).count().ne(0)).
 			orderBy(r.desc('matchedCount')).
-			limit(20);
+			limit(20)
 	*/
 
-	// Get users matched by tags, sort by number of matches from high to low.
+	// Get users and topics matched by tags, sort by number of matches from high to low.
 	query := rdb.DB(a.dbName).
 		Table("users").
-		GetAllByIndex("Tags", allTags...)
+		GetAllByIndex("Tags", allTags...).
+		Union(rdb.DB(a.dbName).Table("topics").
+			GetAllByIndex("Tags", allTags...))
 	if activeOnly {
 		query = query.Filter(rdb.Row.Field("State").Eq(t.StateOK))
 	}
-	query = query.Pluck("Id", "Access", "CreatedAt", "UpdatedAt", "Public", "Trusted", "Tags").
+	query = query.Pluck("Id", "Access", "CreatedAt", "UpdatedAt", "UseBt", "Public", "Trusted", "Tags").
 		Group("Id").
 		Ungroup().
 		Map(func(row rdb.Term) rdb.Term {
 			return row.Field("reduction").
 				Nth(0).
-				Merge(map[string]any{"MatchedTagsCount": row.Field("reduction").Count()})
+				Merge(map[string]any{"MatchedTagsCount": row.Field("reduction").
+					Field("Tags").
+					Nth(0).
+					SetIntersection(allTags).
+					Map(func(tag rdb.Term) any {
+						return rdb.Branch(
+							tag.Match("^"+promoPrefix),
+							20, // If the tag matches the promo prefix, count it as 20.
+							1)  // Otherwise count it as 1.
+					}).
+					Sum()})
 		})
 
-	for _, l := range req {
+	for _, reqDisjunction := range req {
+		if len(reqDisjunction) == 0 {
+			continue
+		}
 		var reqTags []any
-		for _, tag := range l {
+		for _, tag := range reqDisjunction {
 			reqTags = append(reqTags, tag)
 		}
+		// Filter out objects which do not match at least one of the required tags.
 		query = query.Filter(func(row rdb.Term) rdb.Term {
 			return row.Field("Tags").SetIntersection(reqTags).Count().Ne(0)
 		})
@@ -1918,113 +1951,66 @@ func (a *adapter) FindUsers(uid t.Uid, req [][]string, opt []string, activeOnly 
 	}
 	defer cursor.Close()
 
-	var user t.User
-	var sub t.Subscription
-	var subs []t.Subscription
-	for cursor.Next(&user) {
-		if user.Id == uid.String() {
-			// Skip the callee
-			continue
-		}
-		sub.CreatedAt = user.CreatedAt
-		sub.UpdatedAt = user.UpdatedAt
-		sub.User = user.Id
-		sub.SetPublic(user.Public)
-		sub.SetTrusted(user.Trusted)
-		sub.SetDefaultAccess(user.Access.Auth, user.Access.Anon)
-		tags := make([]string, 0, 1)
-		for _, tag := range user.Tags {
-			if _, ok := index[tag]; ok {
-				tags = append(tags, tag)
-			}
-		}
-		sub.Private = tags
-		subs = append(subs, sub)
-	}
-
-	if err = cursor.Err(); err != nil {
-		return nil, err
-	}
-
-	return subs, nil
-
-}
-
-// FindTopics returns a list of topics with matching tags.
-// Searching the 'topics.Tags' for the given tags using respective index.
-func (a *adapter) FindTopics(req [][]string, opt []string, activeOnly bool) ([]t.Subscription, error) {
-	index := make(map[string]struct{})
-	var allReq []string
-	for _, el := range req {
-		allReq = append(allReq, el...)
-	}
-	var allTags []any
-	for _, tag := range append(allReq, opt...) {
-		allTags = append(allTags, tag)
-		index[tag] = struct{}{}
-	}
-	query := rdb.DB(a.dbName).
-		Table("topics").
-		GetAllByIndex("Tags", allTags...)
-	if activeOnly {
-		query = query.Filter(rdb.Row.Field("State").Eq(t.StateOK))
-	}
-	query = query.Pluck("Id", "Access", "CreatedAt", "UpdatedAt", "UseBt", "Public", "Trusted", "Tags").
-		Group("Id").
-		Ungroup().
-		Map(func(row rdb.Term) rdb.Term {
-			return row.Field("reduction").
-				Nth(0).
-				Merge(map[string]any{"MatchedTagsCount": row.Field("reduction").Count()})
-		})
-
-	if len(allReq) > 0 {
-		for _, l := range req {
-			var reqTags []any
-			for _, tag := range l {
-				reqTags = append(reqTags, tag)
-			}
-			query = query.Filter(func(row rdb.Term) rdb.Term {
-				return row.Field("Tags").SetIntersection(reqTags).Count().Ne(0)
-			})
-		}
-	}
-
-	cursor, err := query.OrderBy(rdb.Desc("MatchedTagsCount")).Limit(a.maxResults).Run(a.conn)
-	if err != nil {
-		return nil, err
-	}
-	defer cursor.Close()
-
 	var topic t.Topic
 	var sub t.Subscription
 	var subs []t.Subscription
 	for cursor.Next(&topic) {
-		sub.CreatedAt = topic.CreatedAt
-		sub.UpdatedAt = topic.UpdatedAt
+		if uid := t.ParseUid(topic.Id); !uid.IsZero() {
+			topic.Id = uid.UserId()
+			if topic.Id == caller {
+				// Skip the caller
+				continue
+			}
+		}
+
 		if topic.UseBt {
 			sub.Topic = t.GrpToChn(topic.Id)
 		} else {
 			sub.Topic = topic.Id
 		}
+
+		sub.CreatedAt = topic.CreatedAt
+		sub.UpdatedAt = topic.UpdatedAt
 		sub.SetPublic(topic.Public)
-		sub.SetPublic(topic.Trusted)
+		sub.SetTrusted(topic.Trusted)
 		sub.SetDefaultAccess(topic.Access.Auth, topic.Access.Anon)
-		tags := make([]string, 0, 1)
-		for _, tag := range topic.Tags {
-			if _, ok := index[tag]; ok {
-				tags = append(tags, tag)
-			}
-		}
-		sub.Private = tags
+		// Indicating that the mode is not set, not 'N'.
+		sub.ModeGiven = t.ModeUnset
+		sub.ModeWant = t.ModeUnset
+		sub.Private = common.FilterFoundTags(topic.Tags, index)
 		subs = append(subs, sub)
 	}
 
-	if err = cursor.Err(); err != nil {
-		return nil, err
-	}
-	return subs, nil
+	return subs, cursor.Err()
 
+}
+
+// FindOne returns topic or user which matches the given tag.
+func (a *adapter) FindOne(tag string) (string, error) {
+	query := rdb.DB(a.dbName).
+		Table("users").GetAllByIndex("Tags", tag).
+		Union(rdb.DB(a.dbName).Table("topics").GetAllByIndex("Tags", tag)).
+		Field("Id").
+		Limit(1)
+	cursor, err := query.Run(a.conn)
+	if err != nil {
+		return "", err
+	}
+	defer cursor.Close()
+
+	var found string
+	if err = cursor.One(&found); err != nil {
+		if err == rdb.ErrEmptyResult {
+			return "", nil
+		}
+		return "", err
+	}
+
+	if user := t.ParseUid(found); !user.IsZero() {
+		found = user.UserId()
+	}
+
+	return found, nil
 }
 
 // Messages
@@ -2162,78 +2148,114 @@ func (a *adapter) messagesHardDelete(topic string) error {
 	return err
 }
 
+func rangeToQuery(delRanges []t.Range, topic string, query rdb.Term) rdb.Term {
+	if len(delRanges) > 1 || delRanges[0].Hi <= delRanges[0].Low {
+		var indexVals []any
+		for _, rng := range delRanges {
+			if rng.Hi == 0 {
+				indexVals = append(indexVals, []any{topic, rng.Low})
+			} else {
+				for i := rng.Low; i <= rng.Hi; i++ {
+					indexVals = append(indexVals, []any{topic, i})
+				}
+			}
+		}
+		query = query.GetAllByIndex("Topic_SeqId", indexVals...)
+	} else {
+		// Optimizing for a special case of single range low..hi
+		query = query.Between(
+			[]any{topic, delRanges[0].Low},
+			[]any{topic, delRanges[0].Hi},
+			rdb.BetweenOpts{Index: "Topic_SeqId", RightBound: "closed"})
+	}
+	return query
+}
+
 // MessageDeleteList deletes messages in the given topic with seqIds from the list.
 func (a *adapter) MessageDeleteList(topic string, toDel *t.DelMessage) error {
-	var indexVals []any
 	var err error
 
 	if toDel == nil {
 		// Delete all messages.
-		err = a.messagesHardDelete(topic)
-	} else {
-		// Only some messages are being deleted
+		return a.messagesHardDelete(topic)
+	}
 
-		// Start with making a log entry
-		_, err = rdb.DB(a.dbName).Table("dellog").Insert(toDel).RunWrite(a.conn)
+	// Only some messages are being deleted
+
+	delRanges := toDel.SeqIdRanges
+	query := rangeToQuery(delRanges, topic, rdb.DB(a.dbName).Table("messages"))
+	// Skip already hard-deleted messages.
+	query = query.Filter(rdb.Row.HasFields("DelId").Not())
+	if toDel.DeletedFor == "" {
+		// Hard-deleting messages requires updates to the messages table.
+
+		// We are asked to delete messages no older than newerThan.
+		if newerThan := toDel.GetNewerThan(); newerThan != nil {
+			query = query.Filter(rdb.Row.Field("CreatedAt").Gt(newerThan))
+		}
+
+		query = query.Field("SeqId")
+
+		// Find the actual IDs still present in the database.
+		cursor, err := query.Run(a.conn)
 		if err != nil {
 			return err
 		}
+		defer cursor.Close()
 
-		query := rdb.DB(a.dbName).Table("messages")
-		if len(toDel.SeqIdRanges) > 1 || toDel.SeqIdRanges[0].Hi <= toDel.SeqIdRanges[0].Low {
-			for _, rng := range toDel.SeqIdRanges {
-				if rng.Hi == 0 {
-					indexVals = append(indexVals, []any{topic, rng.Low})
-				} else {
-					for i := rng.Low; i <= rng.Hi; i++ {
-						indexVals = append(indexVals, []any{topic, i})
-					}
-				}
-			}
-			query = query.GetAllByIndex("Topic_SeqId", indexVals...)
-		} else {
-			// Optimizing for a special case of single range low..hi
-			query = query.Between(
-				[]any{topic, toDel.SeqIdRanges[0].Low},
-				[]any{topic, toDel.SeqIdRanges[0].Hi},
-				rdb.BetweenOpts{Index: "Topic_SeqId", RightBound: "closed"})
+		var seqIDs []int
+		if err = cursor.All(&seqIDs); err != nil {
+			return err
 		}
-		// Skip already hard-deleted messages.
-		query = query.Filter(rdb.Row.HasFields("DelId").Not())
-		if toDel.DeletedFor == "" {
-			// First decrement use counter for attachments.
-			if err = a.decFileUseCounter(query); err == nil {
-				// Hard-delete individual messages. Message is not deleted but all fields with personal content
-				// are removed.
-				_, err = query.Replace(rdb.Row.Without("Head", "From", "Content", "Attachments").Merge(
-					map[string]any{
-						"DeletedAt": t.TimeNow(), "DelId": toDel.DelId})).
-					RunWrite(a.conn)
-			}
 
-		} else {
-			// Soft-deleting: adding DelId to DeletedFor
-			_, err = query.
-				// Skip messages already soft-deleted for the current user
-				Filter(func(row rdb.Term) any {
-					return rdb.Not(row.Field("DeletedFor").Default([]any{}).Contains(
-						func(df rdb.Term) any {
-							return df.Field("User").Eq(toDel.DeletedFor)
-						}))
-				}).Update(map[string]any{"DeletedFor": rdb.Row.Field("DeletedFor").
+		if len(seqIDs) == 0 {
+			// Nothing to delete. No need to make a log entry. All done.
+			return nil
+		}
+
+		// Recalculate the actual ranges to delete.
+		sort.Ints(seqIDs)
+		delRanges = t.SliceToRanges(seqIDs)
+
+		// Compose a new query with the new ranges.
+		query = rangeToQuery(delRanges, topic, rdb.DB(a.dbName).Table("messages"))
+
+		// First decrement use counter for attachments.
+		if err = a.decFileUseCounter(query); err != nil {
+			return err
+		}
+
+		// Hard-delete individual messages. The messages are not deleted but all fields with personal content
+		// are removed.
+		if _, err = query.Replace(rdb.Row.Without("Head", "From", "Content", "Attachments").Merge(
+			map[string]any{
+				"DeletedAt": t.TimeNow(), "DelId": toDel.DelId})).
+			RunWrite(a.conn); err != nil {
+			return err
+		}
+
+	} else {
+		// Soft-deleting: adding DelId to DeletedFor.
+		_, err = query.
+			// Skip messages already soft-deleted for the current user
+			Filter(func(row rdb.Term) any {
+				return rdb.Not(row.Field("DeletedFor").Default([]any{}).Contains(
+					func(df rdb.Term) any {
+						return df.Field("User").Eq(toDel.DeletedFor)
+					}))
+			}).
+			Update(map[string]any{"DeletedFor": rdb.Row.Field("DeletedFor").
 				Default([]any{}).Append(
 				&t.SoftDelete{
 					User:  toDel.DeletedFor,
 					DelId: toDel.DelId})}).RunWrite(a.conn)
-		}
-
-		// If operation has failed, remove dellog record.
 		if err != nil {
-			rdb.DB(a.dbName).Table("dellog").Get(toDel.Id).
-				Delete(rdb.DeleteOpts{Durability: "soft", ReturnChanges: false}).RunWrite(a.conn)
+			return err
 		}
 	}
 
+	// Make log entries. Needed for both hard- and soft-deleting.
+	_, err = rdb.DB(a.dbName).Table("dellog").Insert(toDel).RunWrite(a.conn)
 	return err
 }
 
@@ -2396,7 +2418,7 @@ func (a *adapter) CredUpsert(cred *t.Credential) (bool, error) {
 		}
 		defer cursor2.Close()
 		if !cursor2.IsNil() {
-			tableCredentials.Get(cred.Id).
+			_, err = tableCredentials.Get(cred.Id).
 				Replace(rdb.Row.Without("DeletedAt").
 					Merge(map[string]any{
 						"UpdatedAt": cred.UpdatedAt,
@@ -2576,6 +2598,8 @@ func (a *adapter) FileFinishUpload(fd *t.FileDef, success bool, size int64) (*t.
 				"UpdatedAt": now,
 				"Status":    t.UploadCompleted,
 				"Size":      size,
+				"ETag":      fd.ETag,
+				"Location":  fd.Location,
 			}).RunWrite(a.conn); err != nil {
 
 			return nil, err
