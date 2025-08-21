@@ -28,15 +28,17 @@ type style struct {
 }
 
 type entity struct {
-	Tp   string                 `json:"tp,omitempty"`
-	Data map[string]interface{} `json:"data,omitempty"`
+	Tp   string         `json:"tp,omitempty"`
+	Data map[string]any `json:"data,omitempty"`
 }
 
 type document struct {
-	Txt string `json:"txt,omitempty"`
-	txt []rune
+	Txt string   `json:"txt,omitempty"`
 	Fmt []style  `json:"fmt,omitempty"`
 	Ent []entity `json:"ent,omitempty"`
+
+	// Parsed out grapheme clusters.
+	gc *graphemes
 }
 
 type span struct {
@@ -44,11 +46,11 @@ type span struct {
 	at   int
 	end  int
 	key  int
-	data map[string]interface{}
+	data map[string]any
 }
 
 type node struct {
-	txt      []rune
+	gc       *graphemes
 	sp       *span
 	children []*node
 }
@@ -59,11 +61,11 @@ type PreviewState struct {
 	keymap    map[int]int
 }
 
-// Preview shortens Drafty to the specified length (in runes), removes quoted text, leading line breaks,
+// Preview shortens Drafty to the specified length (in graphemes), removes quoted text, leading line breaks,
 // and large content from entities making them suitable for a one-line preview,
 // for example for showing in push notifications.
 // The return value is a Drafty document encoded as JSON string.
-func Preview(content interface{}, length int) (string, error) {
+func Preview(content any, length int) (string, error) {
 	doc, err := decodeAsDrafty(content)
 	if err != nil {
 		return "", err
@@ -93,7 +95,7 @@ func Preview(content interface{}, length int) (string, error) {
 		return "", err
 	}
 
-	state.drafty.Txt = string(state.drafty.txt)
+	state.drafty.Txt = state.drafty.gc.string()
 	data, err := json.Marshal(state.drafty)
 	return string(data), err
 }
@@ -126,7 +128,7 @@ type plainTextState struct {
 
 // PlainText converts drafty document to plain text with some basic markdown-like formatting.
 // Deprecated: use Preview for new development.
-func PlainText(content interface{}) (string, error) {
+func PlainText(content any) (string, error) {
 	doc, err := decodeAsDrafty(content)
 	if err != nil {
 		return "", err
@@ -186,16 +188,16 @@ var tags = map[string]spanfmt{
 }
 
 // Type of the formatter to apply to tree nodes.
-type formatter func(n *node, state interface{}) error
+type formatter func(n *node, state any) error
 
 // toTree converts a drafty document into a tree of formatted spans.
 // Each node of the tree is uniformly formatted.
 func toTree(drafty *document) (*node, error) {
 	if len(drafty.Fmt) == 0 {
-		return &node{txt: drafty.txt}, nil
+		return &node{gc: drafty.gc}, nil
 	}
 
-	textLen := len(drafty.txt)
+	textLen := drafty.gc.length()
 
 	var spans []*span
 	for i := range drafty.Fmt {
@@ -245,7 +247,7 @@ func toTree(drafty *document) (*node, error) {
 	}
 
 	// Iterate over an array of spans.
-	children, err := forEach(drafty.txt, 0, textLen, filtered)
+	children, err := forEach(drafty.gc, 0, textLen, filtered)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +256,7 @@ func toTree(drafty *document) (*node, error) {
 }
 
 // forEach recursively iterates nested spans to form a tree.
-func forEach(line []rune, start, end int, spans []*span) ([]*node, error) {
+func forEach(g *graphemes, start, end int, spans []*span) ([]*node, error) {
 	var result []*node
 
 	// Process ranges calling iterator for each range.
@@ -266,10 +268,9 @@ func forEach(line []rune, start, end int, spans []*span) ([]*node, error) {
 			result = append(result, &node{sp: sp})
 			continue
 		}
-
 		// Add un-styled range before the styled span starts.
 		if start < sp.at {
-			result = append(result, &node{txt: line[start:sp.at]})
+			result = append(result, &node{gc: g.slice(start, sp.at)})
 			start = sp.at
 		}
 
@@ -283,7 +284,7 @@ func forEach(line []rune, start, end int, spans []*span) ([]*node, error) {
 		if tags[sp.tp].isVoid {
 			result = append(result, &node{sp: sp})
 		} else {
-			children, err := forEach(line, start, sp.end, subspans)
+			children, err := forEach(g, start, sp.end, subspans)
 			if err != nil {
 				return nil, err
 			}
@@ -294,14 +295,14 @@ func forEach(line []rune, start, end int, spans []*span) ([]*node, error) {
 
 	// Add the remaining unformatted range.
 	if start < end {
-		result = append(result, &node{txt: line[start:end]})
+		result = append(result, &node{gc: g.slice(start, end)})
 	}
 
 	return result, nil
 }
 
 // plainTextFormatter converts a tree of formatted spans into plan text.
-func plainTextFormatter(n *node, ctx interface{}) error {
+func plainTextFormatter(n *node, ctx any) error {
 	if n.sp != nil && n.sp.tp == "QQ" {
 		return nil
 	}
@@ -316,7 +317,7 @@ func plainTextFormatter(n *node, ctx interface{}) error {
 		}
 		text = string(state.txt)
 	} else {
-		text = string(n.txt)
+		text = n.gc.string()
 	}
 
 	state := ctx.(*plainTextState)
@@ -341,20 +342,15 @@ func plainTextFormatter(n *node, ctx interface{}) error {
 		state.txt += text
 	case "BR":
 		state.txt += "\n"
-	case "IM":
+	case "AU", "EX", "IM", "VD":
 		name, ok := nullableMapGet(n.sp.data, "name")
 		if !ok || name == "" {
 			name = "?"
 		}
-		state.txt += "[IMAGE '" + name + "']"
-	case "EX":
-		name, ok := nullableMapGet(n.sp.data, "name")
-		if !ok || name == "" {
-			name = "?"
-		}
-		state.txt += "[FILE '" + name + "']"
-	case "AU":
-		state.txt += "[AUDIO]"
+		expand := map[string]string{"AU": "AUDIO", "EX": "FILE", "IM": "IMAGE", "VD": "VIDEO"}
+		state.txt += "[" + expand[n.sp.tp] + " '" + name + "']"
+	case "VC":
+		state.txt += "[CALL]"
 	default:
 		state.txt += text
 	}
@@ -362,10 +358,10 @@ func plainTextFormatter(n *node, ctx interface{}) error {
 }
 
 // previewFormatter converts a tree of formatted spans into a shortened drafty document.
-func previewFormatter(n *node, ctx interface{}) error {
+func previewFormatter(n *node, ctx any) error {
 
 	state := ctx.(*PreviewState)
-	at := len(state.drafty.txt)
+	at := state.drafty.gc.length()
 	if at >= state.maxLength {
 		// Maximum doc length reached.
 		return nil
@@ -389,14 +385,19 @@ func previewFormatter(n *node, ctx interface{}) error {
 			}
 		}
 	} else {
-		increment := len(n.txt)
-		if at+increment > state.maxLength {
-			increment = state.maxLength - at
+		increment := n.gc.length()
+		if increment > 0 {
+			if at+increment > state.maxLength {
+				increment = state.maxLength - at
+			}
+			if state.drafty.gc == nil {
+				state.drafty.gc = prepareGraphemes("")
+			}
+			state.drafty.gc = state.drafty.gc.append(n.gc.slice(0, increment))
 		}
-		state.drafty.txt = append(state.drafty.txt, n.txt[:increment]...)
 	}
 
-	end := len(state.drafty.txt)
+	end := state.drafty.gc.length()
 
 	if n.sp != nil {
 		fmt := style{}
@@ -430,7 +431,7 @@ func previewFormatter(n *node, ctx interface{}) error {
 }
 
 // nullableMapGet is a helper method to get a possibly missing string from a possibly nil map.
-func nullableMapGet(data map[string]interface{}, key string) (string, bool) {
+func nullableMapGet(data map[string]any, key string) (string, bool) {
 	if data == nil {
 		return "", false
 	}
@@ -439,7 +440,7 @@ func nullableMapGet(data map[string]interface{}, key string) (string, bool) {
 }
 
 // decodeAsDrafty converts a string or a map to a Drafty document.
-func decodeAsDrafty(content interface{}) (*document, error) {
+func decodeAsDrafty(content any) (*document, error) {
 	if content == nil {
 		return nil, nil
 	}
@@ -448,16 +449,16 @@ func decodeAsDrafty(content interface{}) (*document, error) {
 
 	switch tmp := content.(type) {
 	case string:
-		drafty = &document{txt: []rune(tmp)}
-	case map[string]interface{}:
+		drafty = &document{gc: prepareGraphemes(tmp)}
+	case map[string]any:
 		drafty = &document{}
 		correct := 0
 		if txt, ok := tmp["txt"].(string); ok {
 			drafty.Txt = txt
-			drafty.txt = []rune(txt)
+			drafty.gc = prepareGraphemes(txt)
 			correct++
 		}
-		if ifmt, ok := tmp["fmt"].([]interface{}); ok {
+		if ifmt, ok := tmp["fmt"].([]any); ok {
 			for i := range ifmt {
 				st, err := decodeAsStyle(ifmt[i])
 				if err != nil {
@@ -469,7 +470,7 @@ func decodeAsDrafty(content interface{}) (*document, error) {
 				correct++
 			}
 		}
-		if ient, ok := tmp["ent"].([]interface{}); ok {
+		if ient, ok := tmp["ent"].([]any); ok {
 			for i := range ient {
 				ent, err := decodeAsEntity(ient[i])
 				if err != nil {
@@ -493,12 +494,12 @@ func decodeAsDrafty(content interface{}) (*document, error) {
 }
 
 // decodeAsStyle converts a map to a style.
-func decodeAsStyle(content interface{}) (*style, error) {
+func decodeAsStyle(content any) (*style, error) {
 	if content == nil {
 		return nil, nil
 	}
 
-	tmp, ok := content.(map[string]interface{})
+	tmp, ok := content.(map[string]any)
 	if !ok {
 		return nil, errUnrecognizedContent
 	}
@@ -531,12 +532,12 @@ func decodeAsStyle(content interface{}) (*style, error) {
 }
 
 // decodeAsEntity converts a map to a entity.
-func decodeAsEntity(content interface{}) (*entity, error) {
+func decodeAsEntity(content any) (*entity, error) {
 	if content == nil {
 		return nil, nil
 	}
 
-	tmp, ok := content.(map[string]interface{})
+	tmp, ok := content.(map[string]any)
 	if !ok {
 		return nil, errUnrecognizedContent
 	}
@@ -548,7 +549,7 @@ func decodeAsEntity(content interface{}) (*entity, error) {
 		return nil, errInvalidContent
 	}
 
-	ent.Data, _ = tmp["data"].(map[string]interface{})
+	ent.Data, _ = tmp["data"].(map[string]any)
 
 	return ent, nil
 }
@@ -559,13 +560,13 @@ var lightFields = []string{"mime", "name", "width", "height", "size", "url", "re
 // copyLight makes a copy of an entity retaining keys from the white list.
 // It also ensures the copied values are either basic types of fixed length or a
 // sufficiently short string/byte slice, and the count of entries is not too great.
-func copyLight(in interface{}) map[string]interface{} {
-	data, ok := in.(map[string]interface{})
+func copyLight(in any) map[string]any {
+	data, ok := in.(map[string]any)
 	if !ok {
 		return nil
 	}
 
-	result := map[string]interface{}{}
+	result := map[string]any{}
 	if len(data) > 0 {
 		for _, key := range lightFields {
 			if val, ok := data[key]; ok {
@@ -588,7 +589,7 @@ func copyLight(in interface{}) map[string]interface{} {
 }
 
 // intFromNumeric is a helper methjod to get an integer from a value of any numeric type.
-func intFromNumeric(num interface{}) (int, error) {
+func intFromNumeric(num any) (int, error) {
 	if num == nil {
 		return 0, nil
 	}
@@ -611,7 +612,7 @@ func intFromNumeric(num interface{}) (int, error) {
 }
 
 // getVariableTypeSize checks that the given field is a string or a byte slice and gets its size in bytes.
-func getVariableTypeSize(x interface{}) int {
+func getVariableTypeSize(x any) int {
 	switch val := x.(type) {
 	case string:
 		return len(val)
@@ -623,7 +624,7 @@ func getVariableTypeSize(x interface{}) int {
 }
 
 // isFixedLengthType checks if the given value is a type of a fixed size.
-func isFixedLengthType(x interface{}) bool {
+func isFixedLengthType(x any) bool {
 	switch x.(type) {
 	case nil, bool, int, int8, int16, int32, int64, uint, uint8, uint16,
 		uint32, uint64, float32, float64, complex64, complex128:

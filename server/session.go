@@ -510,7 +510,7 @@ func (s *Session) dispatch(msg *ClientComMessage) {
 	var uaRefresh bool
 
 	// Check if s.ver is defined
-	checkVers := func(m *ClientComMessage, handler func(*ClientComMessage)) func(*ClientComMessage) {
+	checkVers := func(handler func(*ClientComMessage)) func(*ClientComMessage) {
 		return func(m *ClientComMessage) {
 			if s.ver == 0 {
 				logs.Warn.Println("s.dispatch: {hi} is missing", s.sid)
@@ -522,7 +522,7 @@ func (s *Session) dispatch(msg *ClientComMessage) {
 	}
 
 	// Check if user is logged in
-	checkUser := func(m *ClientComMessage, handler func(*ClientComMessage)) func(*ClientComMessage) {
+	checkUser := func(handler func(*ClientComMessage)) func(*ClientComMessage) {
 		return func(m *ClientComMessage) {
 			if msg.AsUser == "" {
 				logs.Warn.Println("s.dispatch: authentication required", s.sid)
@@ -535,19 +535,19 @@ func (s *Session) dispatch(msg *ClientComMessage) {
 
 	switch {
 	case msg.Pub != nil:
-		handler = checkVers(msg, checkUser(msg, s.publish))
+		handler = checkVers(checkUser(s.publish))
 		msg.Id = msg.Pub.Id
 		msg.Original = msg.Pub.Topic
 		uaRefresh = true
 
 	case msg.Sub != nil:
-		handler = checkVers(msg, checkUser(msg, s.subscribe))
+		handler = checkVers(checkUser(s.subscribe))
 		msg.Id = msg.Sub.Id
 		msg.Original = msg.Sub.Topic
 		uaRefresh = true
 
 	case msg.Leave != nil:
-		handler = checkVers(msg, checkUser(msg, s.leave))
+		handler = checkVers(checkUser(s.leave))
 		msg.Id = msg.Leave.Id
 		msg.Original = msg.Leave.Topic
 
@@ -556,28 +556,28 @@ func (s *Session) dispatch(msg *ClientComMessage) {
 		msg.Id = msg.Hi.Id
 
 	case msg.Login != nil:
-		handler = checkVers(msg, s.login)
+		handler = checkVers(s.login)
 		msg.Id = msg.Login.Id
 
 	case msg.Get != nil:
-		handler = checkVers(msg, checkUser(msg, s.get))
+		handler = checkVers(checkUser(s.get))
 		msg.Id = msg.Get.Id
 		msg.Original = msg.Get.Topic
 		uaRefresh = true
 
 	case msg.Set != nil:
-		handler = checkVers(msg, checkUser(msg, s.set))
+		handler = checkVers(checkUser(s.set))
 		msg.Id = msg.Set.Id
 		msg.Original = msg.Set.Topic
 		uaRefresh = true
 
 	case msg.Del != nil:
-		handler = checkVers(msg, checkUser(msg, s.del))
+		handler = checkVers(checkUser(s.del))
 		msg.Id = msg.Del.Id
 		msg.Original = msg.Del.Topic
 
 	case msg.Acc != nil:
-		handler = checkVers(msg, s.acc)
+		handler = checkVers(s.acc)
 		msg.Id = msg.Acc.Id
 
 	case msg.Note != nil:
@@ -760,6 +760,7 @@ func (s *Session) hello(msg *ClientComMessage) {
 			"maxTagCount":        globals.maxTagCount,
 			"maxFileUploadSize":  globals.maxFileUploadSize,
 			"reqCred":            globals.validatorClientConfig,
+			"msgDelAge":          globals.msgDeleteAge.Seconds(),
 		}
 		if len(globals.iceServers) > 0 {
 			params["iceServers"] = globals.iceServers
@@ -1150,6 +1151,9 @@ func (s *Session) set(msg *ClientComMessage) {
 	if msg.Set.Cred != nil {
 		msg.MetaWhat |= constMsgMetaCred
 	}
+	if msg.Set.Aux != nil {
+		msg.MetaWhat |= constMsgMetaAux
+	}
 
 	if msg.MetaWhat == 0 {
 		s.queueOut(ErrMalformedReply(msg, msg.Timestamp))
@@ -1162,8 +1166,8 @@ func (s *Session) set(msg *ClientComMessage) {
 			s.queueOut(ErrServiceUnavailableReply(msg, msg.Timestamp))
 			logs.Err.Println("s.set: sub.meta channel full, topic ", msg.RcptTo, s.sid)
 		}
-	} else if msg.MetaWhat&(constMsgMetaTags|constMsgMetaCred) != 0 {
-		logs.Warn.Println("s.set: can Set tags/creds for subscribed topics only", msg.MetaWhat)
+	} else if msg.MetaWhat&(constMsgMetaTags|constMsgMetaCred|constMsgMetaAux) != 0 {
+		logs.Warn.Println("s.set: setting tags/creds/aux is allowed for subscribed topics only", msg.MetaWhat)
 		s.queueOut(ErrPermissionDeniedReply(msg, msg.Timestamp))
 	} else {
 		// Desc.Private and Sub updates are possible without the subscription.
@@ -1204,7 +1208,7 @@ func (s *Session) del(msg *ClientComMessage) {
 			forUser := asUid
 			var ranges []types.Range
 			ranges = append(ranges, types.Range{Low: 1, Hi: sub.GetSeqId() + 1})
-			if err := store.Messages.DeleteList(sub.Topic, sub.DelId+1, forUser, ranges); err != nil {
+			if err := store.Messages.DeleteList(sub.Topic, sub.DelId+1, forUser, 0, ranges); err != nil {
 				s.queueOut(ErrUnknownReply(msg, types.TimeNow()))
 				break
 			}
@@ -1227,7 +1231,7 @@ func (s *Session) del(msg *ClientComMessage) {
 				recvID:    sub.RecvSeqId,
 				readID:    sub.ReadSeqId,
 			}
-			dr := delrangeDeserialize(ranges)
+			dr := rangeDeserialize(ranges)
 			topic.presPubMessageDelete(asUid, sub.ModeGiven&sub.ModeWant, sub.DelId, dr, msg.sess.sid)
 
 			// 直接调用topic方法
@@ -1456,6 +1460,8 @@ func (s *Session) expandTopicName(msg *ClientComMessage) (string, *ServerComMess
 		routeTo = msg.AsUser
 	} else if msg.Original == "fnd" {
 		routeTo = types.ParseUserId(msg.AsUser).FndName()
+	} else if msg.Original == "slf" {
+		routeTo = types.ParseUserId(msg.AsUser).SlfName()
 	} else if strings.HasPrefix(msg.Original, "usr") {
 		// p2p topic
 		uid1 := types.ParseUserId(msg.AsUser)
